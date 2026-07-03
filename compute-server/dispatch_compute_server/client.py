@@ -69,9 +69,8 @@ class ComputeClient:
     def register(self, config: "ComputeServerConfig") -> dict:
         """POST /api/v1/compute/register using registration_token.
 
-        Raises RuntimeError if no registration_token is configured —
-        the compute-server should skip auto-register and expect
-        admin pre-registration.
+        Raises RuntimeError if no registration_token is configured.
+        (synchronous — called via asyncio.to_thread in main loop)
         """
         if not self.registration_token:
             raise RuntimeError(

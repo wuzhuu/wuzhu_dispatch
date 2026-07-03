@@ -72,6 +72,9 @@ class ComputeServer:
         self.running_tasks: dict[str, RunningTask] = {}
         self._shutdown = False
 
+        # For running synchronous requests without blocking the event loop
+        self._loop = None  # set in _async_run
+
         # Adaptive pull state
         self._state: str = self.STATE_COLD_IDLE
         self._last_task_finish: float = 0.0
@@ -88,10 +91,12 @@ class ComputeServer:
         asyncio.run(self._async_run())
 
     async def _async_run(self):
+        self._loop = asyncio.get_running_loop()
+
         # Registration
         if self.config.registration_token:
             try:
-                resp = self.client.register(self.config)
+                resp = await asyncio.to_thread(self.client.register, self.config)
                 logger.info("Registered node %s: %s",
                             self.config.node_id, resp.get("message"))
             except Exception:
@@ -180,14 +185,14 @@ class ComputeServer:
     async def _do_heartbeat(self, full_metrics: bool = False):
         try:
             if full_metrics:
-                metrics = collect_metrics()
+                metrics = await asyncio.to_thread(collect_metrics)
                 metrics["running_tasks"] = len(self.running_tasks)
-                self.client.heartbeat(metrics)
+                await asyncio.to_thread(self.client.heartbeat, metrics)
                 logger.debug("Heartbeat (full): CPU=%.1f%% Mem=%.1f%% Tasks=%d",
                              metrics["cpu_usage"], metrics["memory_usage"],
                              metrics["running_tasks"])
             else:
-                self.client.heartbeat({
+                await asyncio.to_thread(self.client.heartbeat, {
                     "cpu_usage": 0,
                     "memory_usage": 0,
                     "running_tasks": len(self.running_tasks),
@@ -228,7 +233,7 @@ class ComputeServer:
         wait = self.config.long_poll_wait_seconds if not self.running_tasks else 0
 
         try:
-            task = self.client.pull_task(wait_seconds=wait)
+            task = await asyncio.to_thread(self.client.pull_task, wait_seconds=wait)
         except Exception as e:
             self._state = self.STATE_ERROR_BACKOFF
             self._error_backoff_current = min(

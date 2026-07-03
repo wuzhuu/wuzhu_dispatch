@@ -462,6 +462,75 @@ async def run_tests():
         check("18d. 429 has Content-Security-Policy", has_csp)
         check("18e. 429 has X-Content-Type-Options: nosniff", has_xcto)
 
+        # ═══════════════════════════════════════════════════════════
+        # 19. Long polling: wait_seconds=1 with no matching task
+        # ═══════════════════════════════════════════════════════════
+        # First drain node-b to avoid interference
+        for _ in range(5):
+            r = await cli.post("/api/v1/compute/tasks/pull",
+                               json={},
+                               headers={"Authorization": "Bearer token-b",
+                                        "X-Node-Id": "node-b"})
+            if r.status_code != 200 or r.json() is None:
+                break
+        # Long poll with wait_seconds=1 — should timeout
+        r = await cli.post("/api/v1/compute/tasks/pull?wait_seconds=1",
+                           json={},
+                           headers={"Authorization": "Bearer token-b",
+                                    "X-Node-Id": "node-b"})
+        is_timeout = (r.status_code == 200 and
+                      isinstance(r.json(), dict) and
+                      r.json().get("task") is None and
+                      r.json().get("retry_after_seconds") == 10)
+        check("19. Long poll timeout returns {task:null, retry_after:10}",
+              is_timeout)
+
+        # Disabled node long polling → 403
+        r = await cli.post("/api/v1/compute/tasks/pull?wait_seconds=1",
+                           json={},
+                           headers={"Authorization": "Bearer token-dis",
+                                    "X-Node-Id": "node-disabled"})
+        check("19b. Disabled node long poll → 403", r.status_code == 403)
+
+        # ═══════════════════════════════════════════════════════════
+        # 20. Lightweight heartbeat does not overwrite metrics
+        # ═══════════════════════════════════════════════════════════
+        # First send full metrics
+        r = await cli.post("/api/v1/compute/heartbeat",
+                           json={"cpu_usage": 55.0, "memory_usage": 66.0,
+                                 "running_tasks": 2, "rx_mbps": 10, "tx_mbps": 5,
+                                 "status_json": {}},
+                           headers={"Authorization": "Bearer token-a",
+                                    "X-Node-Id": "node-a"})
+        check("20. Full heartbeat sent", r.status_code == 200)
+
+        # Then send lightweight heartbeat (cpu=0, mem=0 should be ignored)
+        r = await cli.post("/api/v1/compute/heartbeat",
+                           json={"cpu_usage": 0, "memory_usage": 0,
+                                 "running_tasks": 0,
+                                 "status_json": {"lightweight": True}},
+                           headers={"Authorization": "Bearer token-a",
+                                    "X-Node-Id": "node-a"})
+        check("20a. Lightweight heartbeat sent", r.status_code == 200)
+
+        # Verify node status still has original metrics (not zeroed)
+        r = await cli.get("/api/v1/admin/dashboard/nodes",
+                          headers=admin_bearer)
+        if r.status_code == 200:
+            nodes = r.json()
+            node_a = None
+            for n in nodes:
+                if n["node_id"] == "node-a":
+                    node_a = n
+                    break
+            if node_a:
+                check("20b. Lightweight did not zero cpu",
+                      node_a["cpu_usage"] == 55.0)
+                check("20c. Lightweight did not zero memory",
+                      node_a["memory_usage"] == 66.0)
+                check("20d. Lightweight still updated running_tasks",
+                      node_a["running_tasks"] == 0)
+
     # Cleanup
     await engine.dispose()
     if os.path.exists(_db_path):

@@ -118,20 +118,26 @@ async def process_heartbeat(
 
     ns.online = True
     ns.last_heartbeat = now
-    ns.cpu_usage = req.cpu_usage
-    ns.memory_usage = req.memory_usage
-    ns.disk_usage = req.disk_usage
     ns.running_tasks = req.running_tasks
-    ns.rx_mbps = req.rx_mbps
-    ns.tx_mbps = req.tx_mbps
     ns.status_json = req.status_json
+
+    # Lightweight heartbeat: only update online/liveness fields,
+    # do NOT overwrite cpu/memory/disk/rx/tx with stale 0 values.
+    status_json = req.status_json or {}
+    is_lightweight = status_json.get("lightweight") is True
+
+    if not is_lightweight:
+        ns.cpu_usage = req.cpu_usage
+        ns.memory_usage = req.memory_usage
+        ns.disk_usage = req.disk_usage
+        ns.rx_mbps = req.rx_mbps
+        ns.tx_mbps = req.tx_mbps
 
     await db.commit()
     await db.refresh(ns)
 
-    # Record metrics history (only when it's a full metrics report, not lightweight)
-    status_json = req.status_json or {}
-    if not status_json.get("lightweight"):
+    # Record metrics history (only for full metrics reports)
+    if not is_lightweight:
         from ..models import NodeMetricsHistory
         history = NodeMetricsHistory(
             node_id=node.node_id,

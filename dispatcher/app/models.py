@@ -6,6 +6,7 @@ Tables:
   client_api_tokens   — Long-lived client API tokens (separate from node tokens)
   compute_nodes       — Compute server static registration & profile
   compute_node_status — Compute server dynamic heartbeat state
+  node_metrics_history — Historical metrics for dashboard charts
   tasks               — Task queue
   task_logs           — Per-task log entries
   artifacts           — Task output references
@@ -207,6 +208,28 @@ class TaskLog(Base):
 
     def __repr__(self) -> str:
         return f"<TaskLog task_id={self.task_id[:12]}... level={self.level!r}>"
+
+
+class NodeMetricsHistory(Base):
+    """Historical node metrics for dashboard charts."""
+    __tablename__ = "node_metrics_history"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    node_id: Mapped[str] = Column(
+        String(128), ForeignKey("compute_nodes.node_id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    recorded_at: Mapped[datetime] = Column(DateTime, default=datetime.utcnow, index=True)
+    cpu_usage: Mapped[float] = Column(Float, default=0.0)
+    memory_usage: Mapped[float] = Column(Float, default=0.0)
+    disk_usage: Mapped[float] = Column(Float, default=0.0)
+    rx_mbps: Mapped[float] = Column(Float, default=0.0)
+    tx_mbps: Mapped[float] = Column(Float, default=0.0)
+    running_tasks: Mapped[int] = Column(Integer, default=0)
+    status_json: Mapped[dict] = Column(JSONType, default=dict)
+
+    def __repr__(self) -> str:
+        return f"<NodeMetricsHistory node_id={self.node_id!r} at {self.recorded_at}>"
 
 
 class Artifact(Base):

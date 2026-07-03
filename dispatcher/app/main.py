@@ -8,12 +8,17 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+
+import os
+from pathlib import Path
 
 from .config import settings, check_production_settings
 from .database import init_db
 from .middleware.ratelimit import RateLimitMiddleware
 from .middleware.security import CSRFMiddleware, SecurityHeadersMiddleware
-from .routes import admin, auth, client, compute
+from .routes import admin, auth, client, compute, dashboard
 from .scheduler import scheduler_loop
 
 logging.basicConfig(
@@ -85,6 +90,27 @@ def create_app() -> FastAPI:
     app.include_router(client.router)    # /api/v1/client/*
     app.include_router(admin.router)     # /api/v1/admin/*
     app.include_router(compute.router)   # /api/v1/compute/*
+    app.include_router(dashboard.router) # /api/v1/admin/dashboard/*
+
+    # ── Web Dashboard (Jinja2) ────────────────────────────────────
+    _templates_dir = Path(__file__).resolve().parent / "templates"
+    _static_dir = Path(__file__).resolve().parent / "static"
+    _templates_dir.mkdir(exist_ok=True)
+    _static_dir.mkdir(exist_ok=True)
+    templates = Jinja2Templates(directory=str(_templates_dir))
+
+    # Serve static files
+    app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
+
+    @app.get("/admin", include_in_schema=False)
+    async def admin_dashboard(request: Request):
+        """Web Dashboard entry point."""
+        return templates.TemplateResponse("dashboard.html", {"request": request})
+
+    @app.get("/admin/{path:path}", include_in_schema=False)
+    async def admin_dashboard_spa(request: Request, path: str):
+        """Catch-all SPA fallback."""
+        return templates.TemplateResponse("dashboard.html", {"request": request})
 
     @app.get("/health")
     async def health():

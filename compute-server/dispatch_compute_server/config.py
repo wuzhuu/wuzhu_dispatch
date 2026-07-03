@@ -1,13 +1,4 @@
-"""Compute Server configuration — loaded from node.yaml.
-
-This is the /etc/wuzhu-dispatch/node.yaml file that every compute
-server instance carries.  It contains the node's static profile,
-its agent token, and the dispatcher URL to connect to.
-
-Only ``dispatcher_url`` is accepted.  Config loading will fail
-if the field is missing or empty.
-"""
-
+"""Compute Server configuration — loaded from node.yaml."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -41,8 +32,34 @@ class ComputeServerConfig:
         self.static_profile: dict[str, Any] = data.get("static_profile", {})
 
         agent_cfg = data.get("agent", {})
+
+        # ── Heartbeat ────────────────────────────────────────────────
         self.heartbeat_interval: int = agent_cfg.get("heartbeat_interval_seconds", 20)
+        # Separated: lightweight (online proof) vs full (resource metrics)
+        self.lightweight_heartbeat_interval: int = agent_cfg.get(
+            "lightweight_heartbeat_interval_seconds", 30
+        )
+        self.idle_metrics_interval: int = agent_cfg.get(
+            "idle_metrics_interval_seconds", 60
+        )
+        self.cold_idle_metrics_interval: int = agent_cfg.get(
+            "cold_idle_metrics_interval_seconds", 120
+        )
+
+        # ── Pull intervals — adaptive ────────────────────────────────
         self.pull_interval: int = agent_cfg.get("pull_interval_seconds", 10)
+        self.active_pull_interval: int = agent_cfg.get("active_pull_interval_seconds", 3)
+        self.warm_idle_pull_interval: int = agent_cfg.get("warm_idle_pull_interval_seconds", 10)
+        self.cold_idle_pull_interval: int = agent_cfg.get("cold_idle_pull_interval_seconds", 30)
+        self.max_idle_pull_interval: int = agent_cfg.get("max_idle_pull_interval_seconds", 60)
+
+        # ── Long polling ─────────────────────────────────────────────
+        self.long_poll_wait_seconds: int = agent_cfg.get("long_poll_wait_seconds", 25)
+
+        # ── Error backoff ────────────────────────────────────────────
+        self.pull_error_backoff_max: int = agent_cfg.get("pull_error_backoff_max_seconds", 120)
+
+        # ── Work directories ─────────────────────────────────────────
         self.work_dir: str = agent_cfg.get("work_dir", "/opt/wuzhu-dispatch/work")
         self.log_dir: str = agent_cfg.get("log_dir", "/opt/wuzhu-dispatch/logs")
         self.allowed_hermes_workspaces: list[str] = agent_cfg.get("allowed_hermes_workspaces", [])

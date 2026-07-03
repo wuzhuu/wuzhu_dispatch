@@ -38,8 +38,25 @@ static_profile:
     allow_heavy_compute: false
 
 agent:
+  # Heartbeat — lightweight (online proof) and full metrics
   heartbeat_interval_seconds: 20
+  lightweight_heartbeat_interval_seconds: 30
+  idle_metrics_interval_seconds: 60
+  cold_idle_metrics_interval_seconds: 120
+
+  # Pull intervals — adaptive
+  active_pull_interval_seconds: 3
+  warm_idle_pull_interval_seconds: 10
+  cold_idle_pull_interval_seconds: 30
+  max_idle_pull_interval_seconds: 60
   pull_interval_seconds: 10
+
+  # Long polling — dispatcher holds connection when idle
+  long_poll_wait_seconds: 25
+
+  # Error backoff
+  pull_error_backoff_max_seconds: 120
+
   work_dir: "/opt/wuzhu-dispatch/work"
   log_dir: "/opt/wuzhu-dispatch/logs"
   allowed_hermes_workspaces:

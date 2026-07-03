@@ -1,10 +1,19 @@
-"""dispatch-compute-server: main entry point and task lifecycle loop."""
+"""dispatch-compute-server: main entry point and task lifecycle loop.
+
+Adaptive pull intervals:
+- active: tasks running → short interval (default 3 s)
+- warm_idle: just finished a task → medium interval (default 10 s)
+- cold_idle: long idle → long interval (default 30-60 s)
+- error_backoff: network errors → exponential backoff (max 120 s)
+
+Long polling: when idle, uses ``?wait_seconds=25`` so the dispatcher
+holds the connection and returns immediately when a task appears.
+"""
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
-import signal
 import sys
 import time
 import traceback as tb_module
@@ -46,6 +55,12 @@ class RunningTask:
 class ComputeServer:
     """Main compute server orchestrator."""
 
+    # ── Pull-state constants ──────────────────────────────────────
+    STATE_ACTIVE = "active"          # tasks are running
+    STATE_WARM_IDLE = "warm_idle"    # just finished a task
+    STATE_COLD_IDLE = "cold_idle"    # long idle
+    STATE_ERROR_BACKOFF = "error"    # network error backoff
+
     def __init__(self, config: ComputeServerConfig):
         self.config = config
         self.client = ComputeClient(
@@ -57,6 +72,13 @@ class ComputeServer:
         self.running_tasks: dict[str, RunningTask] = {}
         self._shutdown = False
 
+        # Adaptive pull state
+        self._state: str = self.STATE_COLD_IDLE
+        self._last_task_finish: float = 0.0
+        self._error_backoff_current: float = 1.0
+        self._consecutive_errors: int = 0
+        self._last_full_metrics: float = 0.0
+
         os.makedirs(config.work_dir, exist_ok=True)
         os.makedirs(config.log_dir, exist_ok=True)
 
@@ -66,7 +88,7 @@ class ComputeServer:
         asyncio.run(self._async_run())
 
     async def _async_run(self):
-        # Registration: only attempt if registration_token is configured
+        # Registration
         if self.config.registration_token:
             try:
                 resp = self.client.register(self.config)
@@ -84,39 +106,98 @@ class ComputeServer:
         last_heartbeat = 0.0
         last_pull = 0.0
         last_renew_check = 0.0
+        last_state_transition_log = 0.0
 
         while not self._shutdown:
             now = time.time()
 
-            if now - last_heartbeat >= self.config.heartbeat_interval:
-                await self._do_heartbeat()
+            # ── Heartbeat — lightweight every interval, full metrics on schedule
+            if now - last_heartbeat >= self._heartbeat_interval():
+                await self._do_heartbeat(full_metrics=self._should_send_full_metrics())
                 last_heartbeat = now
 
-            if now - last_pull >= self.config.pull_interval:
+            # ── Task pull — adaptive interval + long polling
+            if now - last_pull >= self._pull_interval():
                 await self._do_pull()
                 last_pull = now
 
+            # ── Lease renewal
             if now - last_renew_check >= 30:
                 await self._do_renewals()
                 last_renew_check = now
 
+            # ── Check running tasks
             await self._check_tasks()
-            await asyncio.sleep(1)
+
+            # ── Log state transitions occasionally
+            if now - last_state_transition_log >= 60:
+                if self._consecutive_errors > 0:
+                    logger.info("State=%s running=%d errors=%d",
+                                self._state, len(self.running_tasks), self._consecutive_errors)
+                last_state_transition_log = now
+
+            await asyncio.sleep(0.5)
 
         logger.info("Compute server shutting down.")
 
+    # ── State helpers ─────────────────────────────────────────────
+
+    def _heartbeat_interval(self) -> float:
+        """How often to heartbeat — active nodes heartbeat more."""
+        if self.running_tasks:
+            return self.config.heartbeat_interval
+        return self.config.lightweight_heartbeat_interval
+
+    def _should_send_full_metrics(self) -> bool:
+        """Send full CPU/mem/disk metrics on schedule, lightweight otherwise."""
+        now = time.time()
+        if self.running_tasks:
+            interval = self.config.heartbeat_interval
+        elif self._is_warm():
+            interval = self.config.idle_metrics_interval
+        else:
+            interval = self.config.cold_idle_metrics_interval
+        if now - self._last_full_metrics >= interval:
+            self._last_full_metrics = now
+            return True
+        return False
+
+    def _is_warm(self) -> bool:
+        return (time.time() - self._last_task_finish) < 30
+
+    def _pull_interval(self) -> float:
+        """Adaptive pull interval based on current state."""
+        if self.running_tasks:
+            return self.config.active_pull_interval
+        if self._state == self.STATE_ERROR_BACKOFF:
+            return min(self._error_backoff_current, self.config.pull_error_backoff_max)
+        if self._is_warm():
+            return self.config.warm_idle_pull_interval
+        return min(self.config.cold_idle_pull_interval, self.config.max_idle_pull_interval)
+
     # ── Heartbeat ─────────────────────────────────────────────────
 
-    async def _do_heartbeat(self):
+    async def _do_heartbeat(self, full_metrics: bool = False):
         try:
-            metrics = collect_metrics()
-            metrics["running_tasks"] = len(self.running_tasks)
-            self.client.heartbeat(metrics)
-            logger.debug("Heartbeat sent: CPU=%.1f%% Mem=%.1f%% Tasks=%d",
-                         metrics["cpu_usage"], metrics["memory_usage"],
-                         metrics["running_tasks"])
+            if full_metrics:
+                metrics = collect_metrics()
+                metrics["running_tasks"] = len(self.running_tasks)
+                self.client.heartbeat(metrics)
+                logger.debug("Heartbeat (full): CPU=%.1f%% Mem=%.1f%% Tasks=%d",
+                             metrics["cpu_usage"], metrics["memory_usage"],
+                             metrics["running_tasks"])
+            else:
+                self.client.heartbeat({
+                    "cpu_usage": 0,
+                    "memory_usage": 0,
+                    "running_tasks": len(self.running_tasks),
+                    "status_json": {"state": self._state, "lightweight": True},
+                })
+            self._consecutive_errors = 0
         except Exception:
-            logger.warning("Heartbeat failed", exc_info=True)
+            self._consecutive_errors += 1
+            if self._consecutive_errors <= 3:
+                logger.warning("Heartbeat failed (%d)", self._consecutive_errors)
 
     # ── Lease renewal ─────────────────────────────────────────────
 
@@ -125,7 +206,6 @@ class ComputeServer:
         for rt in list(self.running_tasks.values()):
             if rt.is_done():
                 continue
-            # Use the actual lease_seconds from the pull response
             renew_interval = max(rt.lease_seconds // 2, 30)
             if now - rt.last_renew >= renew_interval:
                 try:
@@ -135,21 +215,40 @@ class ComputeServer:
                 except Exception:
                     logger.warning("Failed to renew lease for task %s", rt.task_id)
 
-    # ── Task pull ─────────────────────────────────────────────────
+    # ── Task pull (with long polling) ─────────────────────────────
 
     async def _do_pull(self):
         profile = self.config.static_profile
         max_parallel = profile.get("limits", {}).get("max_parallel_tasks", 1)
         if len(self.running_tasks) >= max_parallel:
+            # At capacity — switch to active state
+            self._state = self.STATE_ACTIVE
             return
+
+        wait = self.config.long_poll_wait_seconds if not self.running_tasks else 0
 
         try:
-            task = self.client.pull_task()
-        except Exception:
-            logger.debug("No task available (pull error)")
+            task = self.client.pull_task(wait_seconds=wait)
+        except Exception as e:
+            self._state = self.STATE_ERROR_BACKOFF
+            self._error_backoff_current = min(
+                self._error_backoff_current * 2,
+                self.config.pull_error_backoff_max,
+            )
+            logger.debug("Pull failed (backoff=%.1fs): %s", self._error_backoff_current, e)
             return
 
+        # Reset error backoff on success
+        self._error_backoff_current = 1.0
+        self._consecutive_errors = 0
+
         if task is None:
+            self._state = self.STATE_COLD_IDLE
+            return
+
+        # Long-poll timeout — still no task
+        if isinstance(task, dict) and task.get("retry_after_seconds"):
+            self._state = self.STATE_COLD_IDLE
             return
 
         logger.info("Pulled task %s (type=%s, lease=%ds)",
@@ -164,9 +263,9 @@ class ComputeServer:
         rt = RunningTask(task)
         rt.future = asyncio.ensure_future(self._execute_and_report(rt))
         self.running_tasks[rt.task_id] = rt
+        self._state = self.STATE_ACTIVE
 
     async def _execute_and_report(self, rt: RunningTask) -> dict:
-        """Execute the task and report result."""
         task = rt.task
         task_id = task["task_id"]
 
@@ -194,6 +293,8 @@ class ComputeServer:
             except Exception:
                 logger.exception("Failed to upload failure for task %s", task_id)
 
+        self._last_task_finish = time.time()
+        self._state = self.STATE_WARM_IDLE
         return result
 
     # ── Check running tasks ───────────────────────────────────────
@@ -217,6 +318,9 @@ class ComputeServer:
                 except Exception:
                     pass
                 self.running_tasks.pop(tid, None)
+
+        if not self.running_tasks and self._state == self.STATE_ACTIVE:
+            self._state = self.STATE_WARM_IDLE
 
 
 # ── CLI entry point ────────────────────────────────────────────────

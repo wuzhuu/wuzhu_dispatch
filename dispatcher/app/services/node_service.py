@@ -128,6 +128,25 @@ async def process_heartbeat(
 
     await db.commit()
     await db.refresh(ns)
+
+    # Record metrics history (only when it's a full metrics report, not lightweight)
+    status_json = req.status_json or {}
+    if not status_json.get("lightweight"):
+        from ..models import NodeMetricsHistory
+        history = NodeMetricsHistory(
+            node_id=node.node_id,
+            recorded_at=now,
+            cpu_usage=req.cpu_usage,
+            memory_usage=req.memory_usage,
+            disk_usage=req.disk_usage,
+            rx_mbps=req.rx_mbps,
+            tx_mbps=req.tx_mbps,
+            running_tasks=req.running_tasks,
+            status_json=req.status_json,
+        )
+        db.add(history)
+        await db.commit()
+
     return ns
 
 

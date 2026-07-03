@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>wuzhu-dispatch Dashboard</title>
+<link rel="stylesheet" href="/static/dashboard.css">
+</head>
+<body>
+  <nav class="nav">
+    <div class="nav-inner">
+      <a href="/admin" class="logo">wuzhu-dispatch</a>
+      <div class="nav-links">
+        <a href="/admin" class="nav-link" data-page="overview">Overview</a>
+        <a href="/admin/nodes" class="nav-link" data-page="nodes">Nodes</a>
+        <a href="/admin/tasks" class="nav-link" data-page="tasks">Tasks</a>
+        <a href="/admin/login" class="nav-link" id="loginLink">Login</a>
+        <a href="/admin/logout" class="nav-link" id="logoutLink" style="display:none">Logout</a>
+      </div>
+    </div>
+  </nav>
+
+  <main class="main" id="mainContent">
+    <div class="loading">Loading dashboard...</div>
+  </main>
+
+<script>
+// ── State ────────────────────────────────────────────────────────
+let authToken = localStorage.getItem('dispatch_token') || '';
+
+// ── Routing ──────────────────────────────────────────────────────
+function getPage() {
+  const path = window.location.pathname;
+  if (path === '/admin' || path === '/admin/') return 'overview';
+  if (path.startsWith('/admin/nodes')) return 'nodes';
+  if (path.startsWith('/admin/tasks')) return 'tasks';
+  if (path.startsWith('/admin/login')) return 'login';
+  if (path.startsWith('/admin/logout')) return 'logout';
+  return 'overview';
+}
+
+async function navigateTo(page) {
+  const url = page === 'overview' ? '/admin' : `/admin/${page}`;
+  window.history.pushState({page}, '', url);
+  await renderPage(page);
+}
+
+// ── API helper ───────────────────────────────────────────────────
+async function apiGet(path) {
+  const headers = { 'Content-Type': 'application/json' };
+  const r = await fetch(path, { headers, credentials: 'include' });
+  if (r.status === 401) return null;
+  if (!r.ok) { const body = await r.text(); throw new Error(`HTTP ${r.status}: ${body}`); }
+  return r.json();
+}
+
+async function apiPost(path, body) {
+  const csrf = getCSRF();
+  const headers = { 'Content-Type': 'application/json' };
+  if (csrf) headers['X-CSRF-Token'] = csrf;
+  const r = await fetch(path, {
+    method: 'POST',
+    headers,
+    credentials: 'include',
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (r.status === 401) return null;
+  return r.json();
+}
+
+function getCSRF() {
+  const m = document.cookie.match(/csrf_token=([^;]+)/);
+  return m ? m[1] : '';
+}
+
+// ── Renderers ────────────────────────────────────────────────────
+function escapeHtml(text) {
+  const d = document.createElement('div');
+  d.textContent = text;
+  return d.innerHTML;
+}
+
+async function renderOverview() {
+  const summary = await apiGet('/api/v1/admin/dashboard/summary');
+  if (!summary) { showLogin(); return; }
+
+  document.getElementById('mainContent').innerHTML = `
+  <h1>Overview</h1>
+  <div class="cards">
+    <div class="card"><div class="card-label">Online Nodes</div><div class="card-value">${summary.nodes.online} / ${summary.nodes.total}</div></div>
+    <div class="card"><div class="card-label">Pending Tasks</div><div class="card-value">${summary.tasks.pending}</div></div>
+    <div class="card"><div class="card-label">Running Tasks</div><div class="card-value">${summary.tasks.running}</div></div>
+    <div class="card card-success"><div class="card-label">Success Today</div><div class="card-value">${summary.tasks.success_today}</div></div>
+    <div class="card card-danger"><div class="card-label">Failed Today</div><div class="card-value">${summary.tasks.failed_today}</div></div>
+    <div class="card"><div class="card-label">Avg CPU</div><div class="card-value">${summary.resources.avg_cpu_usage}%</div></div>
+    <div class="card"><div class="card-label">Avg Memory</div><div class="card-value">${summary.resources.avg_memory_usage}%</div></div>
+    <div class="card"><div class="card-label">Total RX</div><div class="card-value">${summary.resources.total_rx_mbps} Mbps</div></div>
+    <div class="card"><div class="card-label">Total TX</div><div class="card-value">${summary.resources.total_tx_mbps} Mbps</div></div>
+  </div>
+  <h2>Recent Tasks</h2>
+  <div id="recentTasks"></div>`;
+
+  const tasks = await apiGet('/api/v1/admin/dashboard/recent-tasks?limit=10');
+  if (tasks) {
+    renderTasksTable(tasks, 'recentTasks');
+  }
+}
+
+async function renderNodes() {
+  const nodes = await apiGet('/api/v1/admin/dashboard/nodes');
+  if (!nodes) { showLogin(); return; }
+
+  let html = '<h1>Compute Nodes</h1><table><thead><tr><th>Node</th><th>Region</th><th>Status</th><th>CPU</th><th>Memory</th><th>Disk</th><th>Tasks</th><th>RX/TX</th><th>Last Heartbeat</th></tr></thead><tbody>';
+  for (const n of nodes) {
+    const status = n.online ? '<span class="badge badge-online">Online</span>' : '<span class="badge badge-offline">Offline</span>';
+    html += `<tr>
+      <td><strong>${escapeHtml(n.node_id)}</strong><br><small>${escapeHtml(n.name)}</small></td>
+      <td>${escapeHtml(n.region)}</td>
+      <td>${status}${n.enabled ? '' : ' <span class="badge badge-disabled">Disabled</span>'}</td>
+      <td>${n.cpu_usage}%</td>
+      <td>${n.memory_usage}%</td>
+      <td>${n.disk_usage}%</td>
+      <td>${n.running_tasks}/${n.max_parallel_tasks}</td>
+      <td>${n.rx_mbps.toFixed(1)}/${n.tx_mbps.toFixed(1)}</td>
+      <td>${n.last_heartbeat ? new Date(n.last_heartbeat).toLocaleString() : '-'}</td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  document.getElementById('mainContent').innerHTML = html;
+}
+
+async function renderTasks() {
+  const tasks = await apiGet('/api/v1/admin/tasks');
+  if (!tasks) { showLogin(); return; }
+  document.getElementById('mainContent').innerHTML = '<h1>All Tasks</h1><div id="tasksTable"></div>';
+  renderTasksTable(tasks, 'tasksTable');
+}
+
+function renderTasksTable(tasks, containerId) {
+  let html = '<table><thead><tr><th>ID</th><th>Type</th><th>Status</th><th>Priority</th><th>Node</th><th>Retry</th><th>Created</th></tr></thead><tbody>';
+  for (const t of tasks) {
+    const statusClass = t.status === 'success' ? 'status-success' : t.status === 'failed' || t.status === 'timeout' ? 'status-failed' : t.status === 'running' ? 'status-running' : '';
+    html += `<tr>
+      <td><code>${escapeHtml(t.task_id.slice(0, 12))}...</code></td>
+      <td>${escapeHtml(t.type)}</td>
+      <td class="${statusClass}">${escapeHtml(t.status)}</td>
+      <td>${t.priority}</td>
+      <td>${t.assigned_node_id ? escapeHtml(t.assigned_node_id) : '-'}</td>
+      <td>${t.retry_count}/${t.max_retries}</td>
+      <td>${t.created_at ? new Date(t.created_at).toLocaleString() : '-'}</td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  document.getElementById(containerId).innerHTML = html;
+}
+
+function showLogin() {
+  document.getElementById('mainContent').innerHTML = `
+  <h1>Login</h1>
+  <form id="loginForm">
+    <div class="form-group">
+      <label for="username">Username</label>
+      <input type="text" id="username" name="username" required autocomplete="username">
+    </div>
+    <div class="form-group">
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" required autocomplete="current-password">
+    </div>
+    <div id="loginError" class="error" style="display:none"></div>
+    <button type="submit" class="btn">Login</button>
+  </form>
+  <p class="note">No default credentials. Create an owner user via API first.</p>`;
+
+  document.getElementById('loginForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const username = document.getElementById('username').value;
+    const password = document.getElementById('password').value;
+    const r = await fetch('/api/v1/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+      credentials: 'include',
+    });
+    if (r.ok) {
+      document.getElementById('loginLink').style.display = 'none';
+      document.getElementById('logoutLink').style.display = 'inline';
+      await navigateTo('overview');
+    } else {
+      const err = document.getElementById('loginError');
+      err.textContent = 'Invalid username or password';
+      err.style.display = 'block';
+    }
+  });
+}
+
+async function handleLogout() {
+  await fetch('/api/v1/auth/logout', { method: 'POST', credentials: 'include' });
+  document.getElementById('loginLink').style.display = 'inline';
+  document.getElementById('logoutLink').style.display = 'none';
+  showLogin();
+}
+
+// ── Router ────────────────────────────────────────────────────────
+async function renderPage(page) {
+  document.querySelectorAll('.nav-link').forEach(el => el.classList.remove('active'));
+  const activeLink = document.querySelector(`[data-page="${page}"]`);
+  if (activeLink) activeLink.classList.add('active');
+
+  switch (page) {
+    case 'overview': await renderOverview(); break;
+    case 'nodes': await renderNodes(); break;
+    case 'tasks': await renderTasks(); break;
+    case 'login': showLogin(); break;
+    case 'logout': await handleLogout(); break;
+    default: document.getElementById('mainContent').innerHTML = '<h1>404</h1><p>Page not found.</p>';
+  }
+}
+
+// ── Init ──────────────────────────────────────────────────────────
+window.addEventListener('popstate', async (e) => {
+  const page = getPage();
+  await renderPage(page);
+});
+
+(async () => {
+  const page = getPage();
+  await renderPage(page);
+})();
+</script>
+</body>
+</html>

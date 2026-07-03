@@ -75,28 +75,57 @@ async def compute_heartbeat(
     return MessageResponse(message="OK")
 
 
-@router.post("/tasks/pull", response_model=TaskPullResponse | None)
+@router.post("/tasks/pull", response_model=TaskPullResponse | dict | None)
 async def compute_pull_task(
+    wait_seconds: int = 0,
     db: AsyncSession = Depends(get_db),
     node: ComputeNode = Depends(verify_compute_node),
 ):
     """Pull an available task for this compute server.
 
-    Atomic claim — returns None if no matching task.
+    Supports long polling:
+    - ``?wait_seconds=25`` — block up to 25 s waiting for a task.
+    - If a task becomes available during the wait, it is returned immediately.
+    - On timeout returns ``{"task": null, "retry_after_seconds": 10}``.
+
+    Atomic claim — returns None (no wait) if no matching task.
     """
     task, lease_duration = await pull_task_for_node(db, node)
-    if task is None:
-        return None
-    return TaskPullResponse(
-        task_id=task.task_id,
-        type=task.type,
-        payload=task.payload,
-        lease_until=task.lease_until,
-        lease_seconds=lease_duration,
-        timeout_seconds=task.timeout_seconds,
-        max_retries=task.max_retries,
-        retry_count=task.retry_count,
-    )
+    if task is not None:
+        return TaskPullResponse(
+            task_id=task.task_id,
+            type=task.type,
+            payload=task.payload,
+            lease_until=task.lease_until,
+            lease_seconds=lease_duration,
+            timeout_seconds=task.timeout_seconds,
+            max_retries=task.max_retries,
+            retry_count=task.retry_count,
+        )
+
+    # Long polling: poll DB for up to wait_seconds
+    if wait_seconds > 0:
+        import asyncio
+        import time
+        deadline = time.time() + min(wait_seconds, 60)
+        while time.time() < deadline:
+            await asyncio.sleep(1.5)
+            task, lease_duration = await pull_task_for_node(db, node)
+            if task is not None:
+                return TaskPullResponse(
+                    task_id=task.task_id,
+                    type=task.type,
+                    payload=task.payload,
+                    lease_until=task.lease_until,
+                    lease_seconds=lease_duration,
+                    timeout_seconds=task.timeout_seconds,
+                    max_retries=task.max_retries,
+                    retry_count=task.retry_count,
+                )
+        # Timeout — tell client when to retry
+        return {"task": None, "retry_after_seconds": 10}
+
+    return None
 
 
 @router.post("/tasks/{task_id}/renew", response_model=MessageResponse)

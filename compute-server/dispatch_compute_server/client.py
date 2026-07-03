@@ -102,13 +102,23 @@ class ComputeClient:
 
     # ── Task lifecycle ────────────────────────────────────────────
 
-    def pull_task(self) -> Optional[dict]:
-        """POST /api/v1/compute/tasks/pull — returns task or None."""
+    def pull_task(self, wait_seconds: int = 0) -> Optional[dict]:
+        """POST /api/v1/compute/tasks/pull — returns task or None.
+
+        When *wait_seconds* > 0, the dispatcher holds the connection
+        for up to that many seconds waiting for a suitable task.
+        """
         try:
-            resp = self._post("/api/v1/compute/tasks/pull", {})
+            path = "/api/v1/compute/tasks/pull"
+            if wait_seconds > 0:
+                path += f"?wait_seconds={wait_seconds}"
+            resp = self._post(path, {})
             data = resp.json()
             if data is None:
                 return None
+            # Long-poll timeout response
+            if isinstance(data, dict) and data.get("task") is None:
+                return data
             return data
         except requests.HTTPError as e:
             if e.response is not None and e.response.status_code == 404:

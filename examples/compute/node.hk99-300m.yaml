@@ -1,0 +1,46 @@
+# Compute Server configuration: Hong Kong high-bandwidth node
+# Path: /etc/wuzhu-dispatch/node.yaml
+dispatcher_url: "https://dispatch.example.com"
+
+node_id: "hk99-300m"
+agent_token: "CHANGE_ME"
+
+name: "HK99 High Bandwidth Compute Server"
+region: "HK"
+provider: "HK99"
+
+roles:
+  - compute_server
+
+tags:
+  - hk
+  - high_bandwidth
+  - cn_reachable
+  - public_ipv4
+  - hermes_worker
+
+static_profile:
+  cpu_cores: 2
+  memory_mb: 2048
+  bandwidth_mbps: 300
+  public_ipv4: true
+  public_ipv6: false
+  cn_reachable: good
+  foreign_reachable: excellent
+  runtime:
+    shell: true
+    python: true
+    docker: true
+    hermes: true
+  limits:
+    max_parallel_tasks: 3
+    allow_heavy_download: true
+    allow_heavy_compute: false
+
+agent:
+  heartbeat_interval_seconds: 20
+  pull_interval_seconds: 10
+  work_dir: "/opt/wuzhu-dispatch/work"
+  log_dir: "/opt/wuzhu-dispatch/logs"
+  allowed_hermes_workspaces:
+    - /home/hermes/stock/stackAnalys

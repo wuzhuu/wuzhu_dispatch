@@ -1,0 +1,20 @@
+{
+  "type": "hermes_auto_fix",
+  "priority": 50,
+  "timeout_seconds": 3600,
+  "max_retries": 1,
+  "requirements": {
+    "required_tags": ["hermes_worker"],
+    "runtime": {
+      "hermes": true
+    },
+    "min_memory_mb": 1024
+  },
+  "payload": {
+    "execution": {
+      "mode": "hermes",
+      "workspace": "/home/hermes/stock/stackAnalys",
+      "prompt": "检查采集流程并修复最近一次失败。"
+    }
+  }
+}

@@ -1,0 +1,4 @@
+# Client configuration (used by dispatch-client CLI)
+# Path: ~/.config/wuzhu-dispatch/client.yaml or env vars
+dispatcher_url: "https://dispatch.example.com"
+client_token: "your-client-api-token-here"

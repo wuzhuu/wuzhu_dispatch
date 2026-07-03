@@ -1,0 +1,19 @@
+{
+  "type": "probe_dns",
+  "priority": 30,
+  "timeout_seconds": 60,
+  "max_retries": 1,
+  "requirements": {
+    "required_tags": [],
+    "runtime": {
+      "shell": true
+    },
+    "min_memory_mb": 64
+  },
+  "payload": {
+    "execution": {
+      "mode": "shell",
+      "command": "nslookup baidu.com 8.8.8.8 && curl -s -o /dev/null -w 'HTTP %{http_code} %{time_total}s' https://www.baidu.com"
+    }
+  }
+}

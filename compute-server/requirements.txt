@@ -1,0 +1,4 @@
+# Compute Server — runs on worker nodes
+requests>=2.31.0
+psutil>=5.9.0
+pyyaml>=6.0

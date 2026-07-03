@@ -1,0 +1,20 @@
+{
+  "type": "collect_cn_stock",
+  "priority": 80,
+  "timeout_seconds": 600,
+  "max_retries": 2,
+  "requirements": {
+    "required_tags": ["cn_reachable"],
+    "avoid_tags": ["low_bandwidth"],
+    "runtime": {
+      "python": true
+    },
+    "min_memory_mb": 512
+  },
+  "payload": {
+    "execution": {
+      "mode": "shell",
+      "command": "python /opt/scripts/collect_cn_stock.py"
+    }
+  }
+}

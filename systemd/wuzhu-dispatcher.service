@@ -1,0 +1,16 @@
+[Unit]
+Description=wuzhu-dispatch dispatcher (central control plane)
+After=network-online.target mysql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wuzhu
+WorkingDirectory=/opt/wuzhu-dispatch/dispatcher
+EnvironmentFile=/opt/wuzhu-dispatch/.env
+ExecStart=/usr/local/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,10 @@
+# Dispatcher — central control plane
+# Only this component connects to MySQL
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+sqlalchemy[asyncio]>=2.0.30
+asyncmy>=0.2.9
+aiosqlite>=0.20.0
+pydantic>=2.7.0
+pydantic-settings>=2.2.0
+bcrypt>=4.1.0

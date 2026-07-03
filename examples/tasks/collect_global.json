@@ -1,0 +1,20 @@
+{
+  "type": "collect_global",
+  "priority": 60,
+  "timeout_seconds": 1800,
+  "max_retries": 2,
+  "requirements": {
+    "required_tags": ["foreign_reachable"],
+    "avoid_tags": ["low_bandwidth"],
+    "runtime": {
+      "python": true
+    },
+    "min_memory_mb": 512
+  },
+  "payload": {
+    "execution": {
+      "mode": "shell",
+      "command": "python collect_global.py"
+    }
+  }
+}

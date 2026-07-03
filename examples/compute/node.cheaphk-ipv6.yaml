@@ -1,0 +1,36 @@
+dispatcher_url: "https://dispatch.example.com"
+node_id: "cheaphk-ipv6"
+agent_token: "CHANGE_ME_AGENT_TOKEN"
+name: "Cheap HK IPv6-Only"
+region: "HK"
+provider: "CheapVPS"
+roles:
+  - worker
+tags:
+  - hk
+  - ipv6_only
+  - low_bandwidth
+  - low_performance
+  - cn_reachable
+static_profile:
+  cpu_cores: 1
+  memory_mb: 512
+  bandwidth_mbps: 5
+  public_ipv4: false
+  public_ipv6: true
+  cn_reachable: good
+  foreign_reachable: fair
+  runtime:
+    shell: true
+    python: true
+    docker: false
+    hermes: false
+  limits:
+    max_parallel_tasks: 1
+    allow_heavy_download: false
+    allow_heavy_compute: false
+agent:
+  heartbeat_interval_seconds: 30
+  pull_interval_seconds: 20
+  work_dir: "/opt/wuzhu-dispatch/work"
+  log_dir: "/opt/wuzhu-dispatch/logs"

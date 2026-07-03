@@ -1,0 +1,26 @@
+[Unit]
+Description=wuzhu-dispatch compute server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wuzhu-agent
+Group=wuzhu-agent
+
+WorkingDirectory=/opt/wuzhu-dispatch/compute-server
+ExecStart=/usr/local/bin/dispatch-compute-server -c /etc/wuzhu-dispatch/node.yaml
+
+Restart=always
+RestartSec=10
+StartLimitInterval=300
+StartLimitBurst=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/wuzhu-dispatch/work /opt/wuzhu-dispatch/logs
+
+[Install]
+WantedBy=multi-user.target

@@ -325,46 +325,73 @@ curl -X POST https://dispatch.example.com/api/v1/admin/nodes/register \
 
 #### 工作目录清理 (Cleanup)
 
-Shell 任务在执行时会在 `work_dir/<task_id>/` 下创建临时工作目录。
-长期运行后可能堆积 CSV、HTML、图片、压缩包等文件，导致磁盘占满。
+每个 Shell 任务在 `work_dir/tasks/<task_id>/` 下创建独立目录：
+
+```
+<work_dir>/
+  tasks/
+    <task_id>/
+      work/           # 命令 cwd — 任务执行主目录
+      tmp/            # TMPDIR/TEMP/TMP — 临时文件
+      artifacts/      # 任务希望保留的结果文件
+      logs/           # 本地日志缓存
+      meta.json       # 任务元信息（状态、时间、清理策略）
+  cache/              # 全局缓存（不会被自动清理）
+  quarantine/         # 异常文件隔离（可选）
+```
+
+`work/` 和 `tmp/` 可以安全删除；`artifacts/` 默认保留到任务成功保留时间。
+Hermes workspace（`allowed_hermes_workspaces`）**永远不会**被自动清理。
 
 **默认清理策略：**
 
 | 任务状态 | 默认行为 | 保留时间 |
 |---------|---------|---------|
 | `success` | ✅ 删除 | 1 小时 (`keep_success_seconds: 3600`) |
-| `failed` | ❌ 保留 | 24 小时 (`keep_failed_seconds: 86400`) |
-| `timeout` | ❌ 保留 | 24 小时 (`keep_timeout_seconds: 86400`) |
+| `failed` | ✅ 删除 | 24 小时 (`keep_failed_seconds: 86400`) |
+| `timeout` | ✅ 删除 | 24 小时 (`keep_timeout_seconds: 86400`) |
+| `cancelled` | ✅ 删除 | 1 小时 (`keep_cancelled_seconds: 3600`) |
 
-**配置方式（`node.yaml` 或 `client.yaml` 均可）：**
+**配置方式（`node.yaml` 中 `cleanup` 块）：**
 
 ```yaml
 cleanup:
   enabled: true                    # 全局开关
   cleanup_success: true            # 清理成功任务目录
-  cleanup_failed: false            # 清理失败任务目录
-  cleanup_timeout: false           # 清理超时任务目录
+  cleanup_failed: true             # 清理失败任务目录
+  cleanup_timeout: true            # 清理超时任务目录
+  cleanup_cancelled: true          # 清理取消任务目录
   keep_success_seconds: 3600       # 成功任务保留时间
   keep_failed_seconds: 86400       # 失败任务保留时间
   keep_timeout_seconds: 86400      # 超时任务保留时间
-  cleanup_interval_seconds: 300    # 后台扫描间隔
-  max_work_dir_size_mb: 2048       # 工作目录大小上限
+  keep_cancelled_seconds: 3600     # 取消任务保留时间
+  cleanup_interval_seconds: 300    # 后台扫描间隔（秒）
+  max_work_dir_size_mb: 4096       # 工作目录总大小上限
+  max_task_dir_size_mb: 1024       # 单任务大小上限（可选）
   delete_empty_dirs: true          # 删除空目录
+  legacy_cleanup: false            # 是否清理旧版扁平布局（work_dir/<id>/）
 ```
 
 **安全限制：**
-- 只能删除 `work_dir` 下一级、名称匹配 `[A-Za-z0-9_.-]` 的目录
+- cleanup 只扫描 `work_dir/tasks/`，不扫 `/`、`~`、`/home`、`/opt`
+- task_id 必须匹配 `[A-Za-z0-9_.-]{1,128}`，包含 `..`、`/`、`\0` 等的被拒绝
+- 路径穿越（如 `../../etc`）被 `resolve_under()` 严格拒绝
 - `allowed_hermes_workspaces` 永远不会被自动清理
-- 路径穿越（如 `../../etc`）会被严格拒绝
-- task_id 非法字符（`/`、`\0`、空格等）被拒
+- 当前 `running_tasks` 中的任务目录永远不会被删除
+- 缺失 `meta.json` 的目录按保守策略处理（最长保留时间或 7 天孤儿阈值）
+
+**磁盘压力上报：**
+当 `work_dir/tasks/` 总大小超过 `max_work_dir_size_mb` 时，Compute Server 会在 heartbeat
+的 `status_json` 中上报 `disk_pressure: true` 和 `cleanup_warning` 消息。
 
 **手动清理：**
 ```bash
 # 清理单个任务目录
-rm -rf /opt/wuzhu-dispatch/work/<task_id>
+rm -rf /opt/wuzhu-dispatch/work/tasks/<task_id>
 
-# 清理所有超过 24h 的目录
-find /opt/wuzhu-dispatch/work -maxdepth 1 -type d -mtime +1 -name "[A-Za-z0-9_.-]*" -exec rm -rf {} +
+# 清理所有超过 24h 的任务目录
+find /opt/wuzhu-dispatch/work/tasks -maxdepth 1 -type d -mtime +1 \
+  -name "[A-Za-z0-9_.-]*" -exec rm -rf {} +
 
 # 查看当前占用
 du -sh /opt/wuzhu-dispatch/work
@@ -511,7 +538,7 @@ dispatch-client task logs <task_id>
 pip install -r dispatcher/requirements.txt
 python3 -m compileall -q dispatcher compute-server client common scripts
 python3 scripts/test_pipeline.py          # 48 项单元测试
-python3 scripts/test_cleanup.py           # 38 项清理模块测试
+python3 scripts/test_cleanup.py           # 56 项清理模块测试
 python3 scripts/test_route_integration.py  # 50 项路由集成测试
 ```
 

@@ -24,9 +24,7 @@ from .client import ComputeClient
 from .config import ComputeServerConfig
 from .cleanup import (
     cleanup_expired_task_dirs,
-    cleanup_task_dir,
-    is_safe_child_path,
-    is_valid_task_dir_name,
+    get_work_dir_size,
 )
 from .executor import execute_task
 from .metrics import collect_metrics
@@ -62,10 +60,10 @@ class ComputeServer:
     """Main compute server orchestrator."""
 
     # ── Pull-state constants ──────────────────────────────────────
-    STATE_ACTIVE = "active"          # tasks are running
-    STATE_WARM_IDLE = "warm_idle"    # just finished a task
-    STATE_COLD_IDLE = "cold_idle"    # long idle
-    STATE_ERROR_BACKOFF = "error"    # network error backoff
+    STATE_ACTIVE = "active"
+    STATE_WARM_IDLE = "warm_idle"
+    STATE_COLD_IDLE = "cold_idle"
+    STATE_ERROR_BACKOFF = "error"
 
     def __init__(self, config: ComputeServerConfig):
         self.config = config
@@ -79,7 +77,7 @@ class ComputeServer:
         self._shutdown = False
 
         # For running synchronous requests without blocking the event loop
-        self._loop = None  # set in _async_run
+        self._loop = None
 
         # Adaptive pull state
         self._state: str = self.STATE_COLD_IDLE
@@ -89,10 +87,17 @@ class ComputeServer:
         self._last_full_metrics: float = 0.0
 
         # ── Task outcomes for cleanup decisions ──────────────────
-        # Maps task_id -> {"status": str, "finish_time": float}
         self._task_outcomes: dict[str, dict] = {}
 
+        # ── Disk pressure tracking ────────────────────────────────
+        self._disk_pressure: dict = {
+            "disk_pressure": False,
+            "work_dir_size_mb": 0.0,
+            "cleanup_warning": None,
+        }
+
         os.makedirs(config.work_dir, exist_ok=True)
+        os.makedirs(os.path.join(config.work_dir, "tasks"), exist_ok=True)
         os.makedirs(config.log_dir, exist_ok=True)
 
     # ── Lifecycle ─────────────────────────────────────────────────
@@ -127,12 +132,12 @@ class ComputeServer:
         while not self._shutdown:
             now = time.time()
 
-            # ── Heartbeat — lightweight every interval, full metrics on schedule
+            # ── Heartbeat
             if now - last_heartbeat >= self._heartbeat_interval():
                 await self._do_heartbeat(full_metrics=self._should_send_full_metrics())
                 last_heartbeat = now
 
-            # ── Task pull — adaptive interval + long polling
+            # ── Task pull
             if now - last_pull >= self._pull_interval():
                 await self._do_pull()
                 last_pull = now
@@ -166,31 +171,32 @@ class ComputeServer:
     async def _do_cleanup(self):
         """Background cleanup pass — remove expired task directories."""
         try:
-            removed, remaining = await asyncio.to_thread(
+            running_ids = set(self.running_tasks.keys())
+            removed, remaining, disk_status = await asyncio.to_thread(
                 cleanup_expired_task_dirs,
                 self.config.work_dir,
                 self.config.cleanup,
                 self.config.allowed_hermes_workspaces,
                 self._task_outcomes,
+                running_ids,
             )
             if removed > 0:
                 logger.info(
                     "Cleanup: removed %d task dir(s), %d remaining",
                     removed, remaining,
                 )
+            self._disk_pressure = disk_status
         except Exception:
             logger.exception("Background cleanup failed")
 
     # ── State helpers ─────────────────────────────────────────────
 
     def _heartbeat_interval(self) -> float:
-        """How often to heartbeat — active nodes heartbeat more."""
         if self.running_tasks:
             return self.config.heartbeat_interval
         return self.config.lightweight_heartbeat_interval
 
     def _should_send_full_metrics(self) -> bool:
-        """Send full CPU/mem/disk metrics on schedule, lightweight otherwise."""
         now = time.time()
         if self.running_tasks:
             interval = self.config.heartbeat_interval
@@ -207,7 +213,6 @@ class ComputeServer:
         return (time.time() - self._last_task_finish) < 30
 
     def _pull_interval(self) -> float:
-        """Adaptive pull interval based on current state."""
         if self.running_tasks:
             return self.config.active_pull_interval
         if self._state == self.STATE_ERROR_BACKOFF:
@@ -223,17 +228,24 @@ class ComputeServer:
             if full_metrics:
                 metrics = await asyncio.to_thread(collect_metrics)
                 metrics["running_tasks"] = len(self.running_tasks)
+                # Embed disk pressure in full heartbeat
+                metrics["status_json"] = dict(self._disk_pressure)
                 await asyncio.to_thread(self.client.heartbeat, metrics)
                 logger.debug("Heartbeat (full): CPU=%.1f%% Mem=%.1f%% Tasks=%d",
                              metrics["cpu_usage"], metrics["memory_usage"],
                              metrics["running_tasks"])
             else:
-                await asyncio.to_thread(self.client.heartbeat, {
+                payload = {
                     "cpu_usage": 0,
                     "memory_usage": 0,
                     "running_tasks": len(self.running_tasks),
-                    "status_json": {"state": self._state, "lightweight": True},
-                })
+                    "status_json": {
+                        "state": self._state,
+                        "lightweight": True,
+                        **self._disk_pressure,
+                    },
+                }
+                await asyncio.to_thread(self.client.heartbeat, payload)
             self._consecutive_errors = 0
         except Exception:
             self._consecutive_errors += 1
@@ -262,7 +274,6 @@ class ComputeServer:
         profile = self.config.static_profile
         max_parallel = profile.get("limits", {}).get("max_parallel_tasks", 1)
         if len(self.running_tasks) >= max_parallel:
-            # At capacity — switch to active state
             self._state = self.STATE_ACTIVE
             return
 
@@ -279,7 +290,6 @@ class ComputeServer:
             logger.debug("Pull failed (backoff=%.1fs): %s", self._error_backoff_current, e)
             return
 
-        # Reset error backoff on success
         self._error_backoff_current = 1.0
         self._consecutive_errors = 0
 
@@ -287,7 +297,6 @@ class ComputeServer:
             self._state = self.STATE_COLD_IDLE
             return
 
-        # Long-poll timeout — still no task
         if isinstance(task, dict) and task.get("retry_after_seconds"):
             self._state = self.STATE_COLD_IDLE
             return
@@ -319,7 +328,6 @@ class ComputeServer:
 
         # Determine outcome for cleanup decision
         outcome_status = "success" if result.get("success") else "failed"
-        # Check if it was a timeout
         if not result.get("success") and "timed out" in result.get("error", "").lower():
             outcome_status = "timeout"
 
@@ -354,7 +362,6 @@ class ComputeServer:
         return result
 
     def _prune_stale_outcomes(self, max_age: float = 86400):
-        """Remove task outcomes older than *max_age* seconds."""
         now = time.time()
         stale = [
             tid for tid, info in self._task_outcomes.items()
@@ -376,7 +383,6 @@ class ComputeServer:
             timeout = rt.task.get("timeout_seconds", 3600)
             if rt.future is None and now - rt.start_time > timeout:
                 logger.warning("Task %s timed out after %ds (never started)", tid, timeout)
-                # Record timeout outcome
                 self._task_outcomes[tid] = {
                     "status": "timeout",
                     "finish_time": now,

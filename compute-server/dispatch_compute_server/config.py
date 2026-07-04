@@ -10,7 +10,7 @@ import yaml
 class CleanupConfig:
     """Cleanup policy for task work directories.
 
-    Controls if and when task directories under ``work_dir/<task_id>/``
+    Controls if and when task directories under ``work_dir/tasks/<task_id>/``
     are removed after their tasks complete.
 
     Defaults are chosen to preserve failed/timeout directories for
@@ -21,14 +21,18 @@ class CleanupConfig:
         data = data or {}
         self.enabled: bool = data.get("enabled", True)
         self.cleanup_success: bool = data.get("cleanup_success", True)
-        self.cleanup_failed: bool = data.get("cleanup_failed", False)
-        self.cleanup_timeout: bool = data.get("cleanup_timeout", False)
+        self.cleanup_failed: bool = data.get("cleanup_failed", True)
+        self.cleanup_timeout: bool = data.get("cleanup_timeout", True)
+        self.cleanup_cancelled: bool = data.get("cleanup_cancelled", True)
         self.keep_success_seconds: int = data.get("keep_success_seconds", 3600)
         self.keep_failed_seconds: int = data.get("keep_failed_seconds", 86400)
         self.keep_timeout_seconds: int = data.get("keep_timeout_seconds", 86400)
+        self.keep_cancelled_seconds: int = data.get("keep_cancelled_seconds", 3600)
         self.cleanup_interval_seconds: int = data.get("cleanup_interval_seconds", 300)
-        self.max_work_dir_size_mb: int = data.get("max_work_dir_size_mb", 2048)
+        self.max_work_dir_size_mb: int = data.get("max_work_dir_size_mb", 4096)
+        self.max_task_dir_size_mb: int = data.get("max_task_dir_size_mb", 1024)
         self.delete_empty_dirs: bool = data.get("delete_empty_dirs", True)
+        self.legacy_cleanup: bool = data.get("legacy_cleanup", False)
 
 
 class ComputeServerConfig:
@@ -59,7 +63,6 @@ class ComputeServerConfig:
 
         # ── Heartbeat ────────────────────────────────────────────────
         self.heartbeat_interval: int = agent_cfg.get("heartbeat_interval_seconds", 20)
-        # Separated: lightweight (online proof) vs full (resource metrics)
         self.lightweight_heartbeat_interval: int = agent_cfg.get(
             "lightweight_heartbeat_interval_seconds", 30
         )

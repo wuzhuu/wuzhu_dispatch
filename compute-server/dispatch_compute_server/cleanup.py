@@ -1,46 +1,73 @@
 """Work directory cleanup for task artifact directories.
 
-Provides safe, configurable cleanup of ``work_dir/<task_id>/`` directories
-created by ShellExecutor.  Hermes workspace directories are **never** touched
-— only top-level subdirectories of ``work_dir`` whose names match a safe
-``task_id`` pattern are eligible for removal.
+Directory model::
+
+    <work_dir>/
+      tasks/
+        <task_id>/
+          work/           # shell cwd — execution happens here
+          tmp/            # TMPDIR/TEMP/TMP for the task
+          artifacts/      # result files the task wants to preserve
+          logs/           # local task log cache (optional)
+          meta.json       # task metadata for cleanup decisions
+      cache/              # global cache (never auto-cleaned)
+      quarantine/         # isolated suspicious files (optional)
+
+Cleanup only scans ``<work_dir>/tasks/`` — everything else is excluded.
+Hermes workspace directories are **never** touched.
 
 Policy is driven by :class:`CleanupConfig` from ``node.yaml``.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 import shutil
 import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Set
+from typing import Any, List, Set
 
 logger = logging.getLogger(__name__)
 
-# ── Safe task_id pattern — only allow safe characters ─────────────
+# ── Safe task_id pattern ─────────────────────────────────────────
 # UUIDs, simple slugs, dotted versions:  abc123, task.1, test_run-3
-_SAFE_TASK_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
-
-# Explicitly block path traversal: ".." , "." , "..."
+_SAFE_TASK_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 _TRAVERSAL_NAMES = frozenset({".", "..", "..."})
+
+# ── Subdirectory constants ───────────────────────────────────────
+TASKS_DIR = "tasks"
+WORK_DIR_SUB = "work"
+TMP_DIR_SUB = "tmp"
+ARTIFACT_DIR_SUB = "artifacts"
+LOGS_DIR_SUB = "logs"
+META_FILE = "meta.json"
+
+# ── Orphan threshold — dirs without meta.json older than this are deleted ──
+ORPHAN_MAX_AGE = 7 * 86400  # 7 days
+
+# ── Path safety ──────────────────────────────────────────────────
+
+
+def resolve_under(base: str | Path, child: str | Path) -> Path:
+    """Resolve *child* relative to *base* and confirm it's underneath.
+
+    Raises ``ValueError`` if *child* is not inside *base*.
+    This prevents path traversal attacks (e.g. ``../../etc``).
+    """
+    base_resolved = Path(base).resolve()
+    child_resolved = Path(child).resolve()
+    child_resolved.relative_to(base_resolved)
+    return child_resolved
 
 
 def is_safe_child_path(base_dir: str | Path, path: str | Path) -> bool:
-    """Check if *path* is a direct child of *base_dir* (safe path).
-
-    Resolves both paths and verifies that *path* is inside *base_dir*.
-    This prevents directory traversal attacks (e.g. ``../../etc``).
-
-    Returns ``True`` only when the resolved *path* strictly starts with
-    the resolved *base_dir* as an ancestor.
-    """
+    """Check if *path* is a safe child of *base_dir*."""
     try:
-        base = Path(base_dir).resolve()
-        target = Path(path).resolve()
-        target.relative_to(base)
+        resolve_under(base_dir, path)
         return True
     except (ValueError, RuntimeError, OSError):
         return False
@@ -49,56 +76,145 @@ def is_safe_child_path(base_dir: str | Path, path: str | Path) -> bool:
 def is_valid_task_dir_name(name: str) -> bool:
     """Check if *name* is a safe task directory name.
 
-    Only allows ``[A-Za-z0-9_.-]`` — blocks path traversal components
-    like ``..``, empty string, or slash.  Also blocks bare dot names
-    (``.``, ``..``, ``...``) which are filesystem special entries.
+    Only allows ``[A-Za-z0-9_.-]`` (max 128 chars).
+    Blocks ``..``, ``.``, ``...``, empty, slash, null byte.
     """
-    if not name:
-        return False
-    if name in _TRAVERSAL_NAMES:
+    if not name or name in _TRAVERSAL_NAMES:
         return False
     return bool(_SAFE_TASK_ID_RE.match(name))
 
 
-def get_task_status_dir(work_dir: str, task_id: str) -> str:
-    """Return the path ``work_dir/<task_id>/``.
+# ── Task directory helpers ───────────────────────────────────────
 
-    Does **not** check disk existence — just returns the path string.
+
+def task_root_dir(work_dir: str, task_id: str) -> str:
+    """Return ``<work_dir>/tasks/<task_id>``."""
+    return os.path.join(work_dir, TASKS_DIR, task_id)
+
+
+def task_work_dir(work_dir: str, task_id: str) -> str:
+    """Return ``<work_dir>/tasks/<task_id>/work``."""
+    return os.path.join(work_dir, TASKS_DIR, task_id, WORK_DIR_SUB)
+
+
+def task_tmp_dir(work_dir: str, task_id: str) -> str:
+    """Return ``<work_dir>/tasks/<task_id>/tmp``."""
+    return os.path.join(work_dir, TASKS_DIR, task_id, TMP_DIR_SUB)
+
+
+def task_artifact_dir(work_dir: str, task_id: str) -> str:
+    """Return ``<work_dir>/tasks/<task_id>/artifacts``."""
+    return os.path.join(work_dir, TASKS_DIR, task_id, ARTIFACT_DIR_SUB)
+
+
+def task_logs_dir(work_dir: str, task_id: str) -> str:
+    """Return ``<work_dir>/tasks/<task_id>/logs``."""
+    return os.path.join(work_dir, TASKS_DIR, task_id, LOGS_DIR_SUB)
+
+
+def task_meta_path(work_dir: str, task_id: str) -> str:
+    """Return ``<work_dir>/tasks/<task_id>/meta.json``."""
+    return os.path.join(work_dir, TASKS_DIR, task_id, META_FILE)
+
+
+# ── Meta.json I/O ────────────────────────────────────────────────
+
+
+def write_task_meta(
+    work_dir: str,
+    task_id: str,
+    status: str = "running",
+    execution_mode: str = "shell",
+    cleanup_after: float | None = None,
+    started_at: str | None = None,
+):
+    """Write or update ``meta.json`` for a task.
+
+    If the file already exists, it is updated (not overwritten) so
+    that ``created_at`` is preserved.
     """
-    return os.path.join(work_dir, task_id)
+    path = Path(task_meta_path(work_dir, task_id))
+    existing: dict[str, Any] = {}
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    meta: dict[str, Any] = {
+        "task_id": task_id,
+        "status": status,
+        "created_at": existing.get("created_at", now_iso),
+        "started_at": started_at or existing.get("started_at", now_iso),
+        "finished_at": None,
+        "execution_mode": execution_mode,
+        "cleanup_after": cleanup_after,
+        "task_root": task_root_dir(work_dir, task_id),
+        "task_work_dir": task_work_dir(work_dir, task_id),
+        "task_tmp_dir": task_tmp_dir(work_dir, task_id),
+        "task_artifact_dir": task_artifact_dir(work_dir, task_id),
+    }
+    if status != "running":
+        meta["finished_at"] = existing.get("finished_at", now_iso)
+        if cleanup_after is not None:
+            meta["cleanup_after"] = cleanup_after
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(meta, indent=2, ensure_ascii=False) + "\n")
 
 
-def is_task_dir(work_dir: str, dir_path: str | Path) -> bool:
-    """Check if *dir_path* is a plausible task subdirectory of *work_dir*.
+def read_task_meta(work_dir: str, task_id: str) -> dict[str, Any] | None:
+    """Read ``meta.json`` for a task, returning ``None`` if missing/corrupt."""
+    path = Path(task_meta_path(work_dir, task_id))
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
 
-    - Must be under *work_dir*
-    - Name must match :func:`is_valid_task_dir_name`
-    - Must be a directory
-    """
-    if not is_safe_child_path(work_dir, dir_path):
-        return False
-    name = Path(dir_path).name
-    return is_valid_task_dir_name(name)
+
+def update_task_meta_status(
+    work_dir: str,
+    task_id: str,
+    status: str,
+    cleanup_after: float | None = None,
+):
+    """Update the status (and optionally cleanup_after) in meta.json."""
+    meta = read_task_meta(work_dir, task_id) or {
+        "task_id": task_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "task_root": task_root_dir(work_dir, task_id),
+    }
+    meta["status"] = status
+    meta["finished_at"] = datetime.now(timezone.utc).isoformat()
+    if cleanup_after is not None:
+        meta["cleanup_after"] = cleanup_after
+
+    path = Path(task_meta_path(work_dir, task_id))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(meta, indent=2, ensure_ascii=False) + "\n")
+
+
+# ── Core cleanup operations ──────────────────────────────────────
 
 
 def cleanup_task_dir(work_dir: str, task_id: str, reason: str = "cleanup") -> bool:
-    """Remove the task directory ``work_dir/<task_id>/`` if it exists.
-
-    Returns ``True`` if the directory was removed, ``False`` if it did
-    not exist or if safety checks failed.
+    """Remove ``<work_dir>/tasks/<task_id>/`` if it exists.
 
     Safety checks:
     - ``task_id`` must match :func:`is_valid_task_dir_name`
-    - The resulting path must be under *work_dir* (path traversal guard)
-    - The directory must not be an allowed Hermes workspace
+    - The resulting path must be under ``<work_dir>/tasks/``
     """
     if not is_valid_task_dir_name(task_id):
         logger.warning("Cleanup refused: invalid task_id %r", task_id)
         return False
 
-    task_dir = os.path.join(work_dir, task_id)
+    task_dir = task_root_dir(work_dir, task_id)
 
-    if not is_safe_child_path(work_dir, task_dir):
+    if not is_safe_child_path(os.path.join(work_dir, TASKS_DIR), task_dir):
         logger.warning("Cleanup refused: path traversal %r", task_dir)
         return False
 
@@ -114,47 +230,60 @@ def cleanup_task_dir(work_dir: str, task_id: str, reason: str = "cleanup") -> bo
         return False
 
 
-def _get_eligible_task_dirs(
+# ── Scanning ─────────────────────────────────────────────────────
+
+
+def _get_tasks_base(work_dir: str) -> Path:
+    """Return the resolved ``<work_dir>/tasks/`` path."""
+    return Path(os.path.join(work_dir, TASKS_DIR)).resolve()
+
+
+def _scan_task_dirs(
     work_dir: str,
-    cleanup_cfg: "CleanupConfig",  # type: ignore[name-defined]  # noqa: F821
     allowed_workspaces: list[str] | None = None,
+    exclude_running: set[str] | None = None,
 ) -> list[dict]:
-    """Scan *work_dir* for task subdirectories and determine eligibility.
+    """Scan ``<work_dir>/tasks/`` for task subdirectories.
 
     Returns a list of dicts::
 
         {
             "path": Path,
-            "name": str,                    # task_id
-            "mtime": float,                 # last modified time
+            "name": str,          # task_id
+            "mtime": float,
             "age_seconds": float,
+            "meta": dict | None,  # parsed meta.json or None
+            "has_meta": bool,
         }
 
-    Only returns directories that are candidate for cleanup (not Hermes
-    workspaces, not the work_dir itself, valid task names).
+    Only returns directories that match :func:`is_valid_task_dir_name`.
+    Excludes ``allowed_workspaces`` Hermes dirs.
     """
-    allowed_workspaces = allowed_workspaces or []
     allowed_resolved: Set[Path] = set()
-    for ws in allowed_workspaces:
+    for ws in allowed_workspaces or []:
         try:
             allowed_resolved.add(Path(ws).expanduser().resolve())
         except Exception:
             pass
 
-    base = Path(work_dir).resolve()
-    if not base.is_dir():
+    exclude_running = exclude_running or set()
+    tasks_dir = _get_tasks_base(work_dir)
+
+    if not tasks_dir.is_dir():
         return []
 
     entries: list[dict] = []
-    for entry in base.iterdir():
+    for entry in tasks_dir.iterdir():
         if not entry.is_dir():
             continue
 
         name = entry.name
         if not is_valid_task_dir_name(name):
             continue
+        if name in exclude_running:
+            continue
 
-        # Exclude Hermes workspaces that happen to be under work_dir
+        # Exclude Hermes workspaces that happen to be under tasks/
         try:
             resolved = entry.resolve()
         except OSError:
@@ -167,104 +296,104 @@ def _get_eligible_task_dirs(
         except OSError:
             continue
 
+        meta = read_task_meta(work_dir, name)
+
         entries.append({
             "path": entry,
             "name": name,
             "mtime": mtime,
             "age_seconds": time.time() - mtime,
+            "meta": meta,
+            "has_meta": meta is not None,
         })
 
     return entries
 
 
-def cleanup_expired_task_dirs(
+def _scan_legacy_dirs(
     work_dir: str,
-    cleanup_cfg: "CleanupConfig",  # type: ignore[name-defined]  # noqa: F821
-    allowed_workspaces: list[str] | None = None,
-    task_outcomes: dict[str, dict] | None = None,
-) -> tuple[int, int]:
-    """Scan *work_dir* and remove expired task directories.
+    exclude_running: set[str] | None = None,
+) -> list[dict]:
+    """Scan ``<work_dir>/`` for legacy flat-layout task directories.
 
-    Returns ``(removed_count, remaining_count)``.
-
-    Cleanup logic:
-    1. For each task dir, check if we have a recorded outcome (status +
-       finish_time) from *task_outcomes*.  If available, apply the
-       corresponding retention policy per status.
-    2. Without an outcome record, use the **most conservative** (longest)
-       retention across all enabled categories to avoid deleting dirs
-       whose status is unknown.
-    3. If total work_dir size exceeds ``max_work_dir_size_mb``, the
-       oldest directories are evicted even if within their retention
-       window.
+    Only used when ``legacy_cleanup`` is enabled.  Returns entries
+    for directories directly under ``work_dir`` that match the
+    task_id pattern.
     """
-    if not cleanup_cfg.enabled:
-        logger.debug("Cleanup disabled — skipping")
-        return (0, 0)
+    exclude_running = exclude_running or set()
+    base = Path(work_dir).resolve()
+    if not base.is_dir():
+        return []
 
-    task_outcomes = task_outcomes or {}
-    allowed_workspaces = allowed_workspaces or []
-    entries = _get_eligible_task_dirs(work_dir, cleanup_cfg, allowed_workspaces)
+    entries: list[dict] = []
+    for entry in base.iterdir():
+        if not entry.is_dir():
+            continue
+        name = entry.name
+        if not is_valid_task_dir_name(name):
+            continue
+        if name in exclude_running:
+            continue
 
-    if not entries:
-        return (0, 0)
+        try:
+            mtime = entry.stat().st_mtime
+        except OSError:
+            continue
 
-    removed = 0
+        entries.append({
+            "path": entry,
+            "name": name,
+            "mtime": mtime,
+            "age_seconds": time.time() - mtime,
+            "meta": None,
+            "has_meta": False,
+        })
 
-    # Sort by mtime ascending (oldest first)
-    entries.sort(key=lambda e: e["mtime"])
-
-    for entry in entries:
-        name = entry["name"]
-        age = entry["age_seconds"]
-
-        if should_delete_task_dir(name, age, cleanup_cfg, task_outcomes):
-            if cleanup_task_dir(work_dir, name, reason="expired"):
-                removed += 1
-
-    # Size-based eviction (only if enabled and after time-based removal)
-    if cleanup_cfg.max_work_dir_size_mb > 0:
-        current_size_mb = get_work_dir_size(work_dir)
-        max_bytes = cleanup_cfg.max_work_dir_size_mb * 1024 * 1024
-
-        if current_size_mb * 1024 * 1024 > max_bytes:
-            # Re-scan to get still-present directories
-            remaining = _get_eligible_task_dirs(work_dir, cleanup_cfg, allowed_workspaces)
-            remaining.sort(key=lambda e: e["mtime"])  # oldest first
-
-            for entry in remaining:
-                if current_size_mb * 1024 * 1024 <= max_bytes:
-                    break
-                # Do not delete very recent (< 60s) dirs to avoid races
-                if entry["age_seconds"] < 60:
-                    continue
-                if cleanup_task_dir(work_dir, entry["name"], reason="size-evict"):
-                    removed += 1
-                    dir_size_mb = _dir_size_mb(entry["path"])
-                    current_size_mb -= dir_size_mb
-
-    # Delete empty leftover directories if configured
-    if cleanup_cfg.delete_empty_dirs and removed > 0:
-        _remove_empty_subdirs(work_dir)
-
-    remaining = len(_get_eligible_task_dirs(work_dir, cleanup_cfg, allowed_workspaces))
-    return (removed, remaining)
+    return entries
 
 
-def should_delete_task_dir(
-    name: str,
-    age_seconds: float,
+# ── Cleanup logic ────────────────────────────────────────────────
+
+
+def should_delete_entry(
+    entry: dict,
     cleanup_cfg: "CleanupConfig",  # type: ignore[name-defined]  # noqa: F821
     task_outcomes: dict[str, dict] | None = None,
 ) -> bool:
-    """Decide whether a task directory should be deleted.
+    """Decide whether a task directory entry should be deleted.
 
-    Uses recorded *task_outcomes* when available; otherwise falls back
-    to **all** active cleanup categories (safe default).
+    Decision priority:
+    1. If ``meta.json`` exists, read ``status`` and ``cleanup_after``.
+    2. If not, check *task_outcomes* (in-memory tracker from main.py).
+    3. If neither, treat as orphan (delete if older than 7 days).
     """
+    name = entry["name"]
+    age = entry["age_seconds"]
+    meta = entry.get("meta")
     task_outcomes = task_outcomes or {}
-    outcome = task_outcomes.get(name)
 
+    # ── Priority 1: meta.json
+    if meta:
+        status = meta.get("status", "unknown")
+        cleanup_after = meta.get("cleanup_after")
+
+        if cleanup_after is not None:
+            # Explicit cleanup-after timestamp
+            return time.time() >= cleanup_after
+
+        if status == "success" and cleanup_cfg.cleanup_success:
+            return age >= cleanup_cfg.keep_success_seconds
+        elif status == "failed" and cleanup_cfg.cleanup_failed:
+            return age >= cleanup_cfg.keep_failed_seconds
+        elif status == "timeout" and cleanup_cfg.cleanup_timeout:
+            return age >= cleanup_cfg.keep_timeout_seconds
+        elif status == "cancelled" and cleanup_cfg.cleanup_cancelled:
+            return age >= cleanup_cfg.keep_cancelled_seconds
+        # Unknown status or not configured for cleanup — keep
+        return False
+
+    # ── Priority 2: in-memory outcomes (from main.py)
+    outcome = task_outcomes.get(name)
     if outcome:
         status = outcome.get("status", "success")
         finish_time = outcome.get("finish_time", 0.0)
@@ -276,24 +405,187 @@ def should_delete_task_dir(
             return dir_age >= cleanup_cfg.keep_failed_seconds
         elif status == "timeout" and cleanup_cfg.cleanup_timeout:
             return dir_age >= cleanup_cfg.keep_timeout_seconds
-        # Status not eligible for cleanup — keep
+        elif status == "cancelled" and cleanup_cfg.cleanup_cancelled:
+            return dir_age >= cleanup_cfg.keep_cancelled_seconds
         return False
 
-    # No outcome record — use the most conservative (longest) retention
-    # across enabled categories
-    max_retention = 0
-    if cleanup_cfg.cleanup_success:
-        max_retention = max(max_retention, cleanup_cfg.keep_success_seconds)
-    if cleanup_cfg.cleanup_failed:
-        max_retention = max(max_retention, cleanup_cfg.keep_failed_seconds)
-    if cleanup_cfg.cleanup_timeout:
-        max_retention = max(max_retention, cleanup_cfg.keep_timeout_seconds)
-
+    # ── Priority 3: orphan — no meta, no outcome
+    # Use longest active retention as safe-guard
+    max_retention = _max_active_retention(cleanup_cfg)
     if max_retention > 0:
-        return age_seconds >= max_retention
+        if age >= max_retention:
+            return True
+    # Even without active categories, delete very old orphans
+    return age >= ORPHAN_MAX_AGE
 
-    # No cleanup categories active — never delete from time-based rules
-    return False
+
+def _max_active_retention(cleanup_cfg: "CleanupConfig") -> int:
+    """Return the longest retention across all active categories."""
+    ret = 0
+    if cleanup_cfg.cleanup_success:
+        ret = max(ret, cleanup_cfg.keep_success_seconds)
+    if cleanup_cfg.cleanup_failed:
+        ret = max(ret, cleanup_cfg.keep_failed_seconds)
+    if cleanup_cfg.cleanup_timeout:
+        ret = max(ret, cleanup_cfg.keep_timeout_seconds)
+    if cleanup_cfg.cleanup_cancelled:
+        ret = max(ret, cleanup_cfg.keep_cancelled_seconds)
+    return ret
+
+
+# ── Main cleanup entry point ─────────────────────────────────────
+
+
+def cleanup_expired_task_dirs(
+    work_dir: str,
+    cleanup_cfg: "CleanupConfig",  # type: ignore[name-defined]  # noqa: F821
+    allowed_workspaces: list[str] | None = None,
+    task_outcomes: dict[str, dict] | None = None,
+    running_task_ids: set[str] | None = None,
+) -> tuple[int, int, dict]:
+    """Scan ``<work_dir>/tasks/`` and remove expired task directories.
+
+    Returns ``(removed_count, remaining_count, disk_status)`` where
+    ``disk_status`` is a dict that can be embedded in heartbeat metrics::
+
+        {
+            "disk_pressure": bool,
+            "work_dir_size_mb": float,
+            "cleanup_warning": str | None,
+        }
+
+    Cleanup logic:
+    1. For each task dir with a known outcome (meta.json or in-memory),
+       apply the corresponding retention policy.
+    2. For orphan dirs (no meta, no outcome), use the longest retention
+       or delete if older than 7 days.
+    3. Never delete currently running task dirs.
+    4. Size-based eviction: if total size > max_work_dir_size_mb, delete
+       oldest success/cancelled dirs first.
+    5. Legacy mode: optionally scan flat ``<work_dir>/<task_id>`` dirs.
+    """
+    running_task_ids = running_task_ids or set()
+
+    if not cleanup_cfg.enabled:
+        logger.debug("Cleanup disabled — skipping")
+        return (0, 0, {"disk_pressure": False, "work_dir_size_mb": 0.0, "cleanup_warning": None})
+
+    allowed_workspaces = allowed_workspaces or []
+    task_outcomes = task_outcomes or {}
+    removed = 0
+
+    # ── V8.2 layout: scan <work_dir>/tasks/ ──────────────────────
+    entries = _scan_task_dirs(work_dir, allowed_workspaces, running_task_ids)
+    entries.sort(key=lambda e: e["mtime"])  # oldest first
+
+    for entry in entries:
+        if should_delete_entry(entry, cleanup_cfg, task_outcomes):
+            if cleanup_task_dir(work_dir, entry["name"], reason="expired"):
+                removed += 1
+
+    # ── Legacy layout (optional): scan <work_dir>/ directly ───────
+    if cleanup_cfg.legacy_cleanup:
+        legacy = _scan_legacy_dirs(work_dir, running_task_ids)
+        legacy.sort(key=lambda e: e["mtime"])
+        for entry in legacy:
+            if should_delete_entry(entry, cleanup_cfg, task_outcomes):
+                if cleanup_task_dir(work_dir, entry["name"], reason="legacy-expired"):
+                    removed += 1
+
+    # ── Size-based eviction ───────────────────────────────────────
+    disk_status = _size_based_eviction(work_dir, cleanup_cfg, allowed_workspaces,
+                                       running_task_ids, task_outcomes)
+    removed += disk_status.get("evicted", 0)
+
+    # ── Delete empty leftover directories ─────────────────────────
+    if cleanup_cfg.delete_empty_dirs:
+        _remove_empty_task_dirs(work_dir)
+
+    remaining = len(_scan_task_dirs(work_dir, allowed_workspaces, running_task_ids))
+    if cleanup_cfg.legacy_cleanup:
+        remaining += len(_scan_legacy_dirs(work_dir, running_task_ids))
+
+    # ── Build disk status ─────────────────────────────────────────
+    current_mb = get_work_dir_size(work_dir)
+    warning = None
+    pressure = False
+    if cleanup_cfg.max_work_dir_size_mb > 0 and current_mb > cleanup_cfg.max_work_dir_size_mb:
+        pressure = True
+        warning = f"work_dir exceeds max_work_dir_size_mb ({current_mb:.0f} > {cleanup_cfg.max_work_dir_size_mb})"
+
+    return (removed, remaining, {
+        "disk_pressure": pressure,
+        "work_dir_size_mb": round(current_mb, 1),
+        "cleanup_warning": warning,
+    })
+
+
+def _size_based_eviction(
+    work_dir: str,
+    cleanup_cfg: "CleanupConfig",
+    allowed_workspaces: list[str] | None,
+    running_task_ids: set[str],
+    task_outcomes: dict[str, dict],
+) -> dict:
+    """Delete oldest directories when work_dir exceeds max size.
+
+    Returns ``{"evicted": int}``.
+    """
+    evicted = 0
+    if cleanup_cfg.max_work_dir_size_mb <= 0:
+        return {"evicted": 0}
+
+    current_size = get_work_dir_size(work_dir)
+    max_bytes = cleanup_cfg.max_work_dir_size_mb * 1024 * 1024
+
+    if current_size * 1024 * 1024 <= max_bytes:
+        return {"evicted": 0}
+
+    # Gather eligible dirs, sorted oldest first
+    candidates = _scan_task_dirs(work_dir, allowed_workspaces, running_task_ids)
+    candidates.sort(key=lambda e: e["mtime"])
+
+    for entry in candidates:
+        if current_size * 1024 * 1024 <= max_bytes:
+            break
+        if entry["age_seconds"] < 60:
+            continue  # don't delete very recent dirs
+        if entry["name"] in running_task_ids:
+            continue  # never delete running
+
+        # Only delete if it's eligible (prefer success/cancelled)
+        meta = entry.get("meta")
+        status = meta.get("status") if meta else None
+        outcome = task_outcomes.get(entry["name"], {})
+        ostatus = outcome.get("status")
+
+        effective_status = status or ostatus or "unknown"
+        if effective_status in ("unknown", "running"):
+            continue  # skip unknown/running for size eviction
+
+        if cleanup_task_dir(work_dir, entry["name"], reason="size-evict"):
+            evicted += 1
+            current_size -= _dir_size_mb(entry["path"])
+
+    return {"evicted": evicted}
+
+
+def _remove_empty_task_dirs(work_dir: str):
+    """Remove empty task root directories under ``<work_dir>/tasks/``."""
+    tasks_dir = _get_tasks_base(work_dir)
+    if not tasks_dir.is_dir():
+        return
+    for entry in tasks_dir.iterdir():
+        if entry.is_dir() and is_valid_task_dir_name(entry.name):
+            try:
+                if not any(entry.iterdir()):
+                    entry.rmdir()
+                    logger.debug("Removed empty task dir %s", entry.name)
+            except OSError:
+                pass
+
+
+# ── Size utilities ───────────────────────────────────────────────
 
 
 def _dir_size_mb(path: Path) -> float:
@@ -308,27 +600,37 @@ def _dir_size_mb(path: Path) -> float:
     return total / (1024 * 1024)
 
 
-def _remove_empty_subdirs(work_dir: str):
-    """Remove empty subdirectories of *work_dir* (one level only)."""
-    base = Path(work_dir).resolve()
-    if not base.is_dir():
-        return
-    for entry in base.iterdir():
-        if entry.is_dir() and is_valid_task_dir_name(entry.name):
-            try:
-                if not any(entry.iterdir()):  # empty
-                    entry.rmdir()
-                    logger.debug("Removed empty directory %s", entry.name)
-            except OSError:
-                pass
-
-
 def get_work_dir_size(work_dir: str) -> float:
-    """Get total size of *work_dir* in MB.
-
-    This includes **all** contents (task dirs, stray files, etc).
-    """
+    """Get total size of *work_dir* in MB (all contents)."""
     base = Path(work_dir).resolve()
     if not base.is_dir():
         return 0.0
     return _dir_size_mb(base)
+
+
+def get_tasks_dir_size(work_dir: str) -> float:
+    """Get total size of ``<work_dir>/tasks/`` in MB."""
+    tasks_dir = _get_tasks_base(work_dir)
+    if not tasks_dir.is_dir():
+        return 0.0
+    return _dir_size_mb(tasks_dir)
+
+
+# ── Legacy helper — check if a path is an old-style flat task dir ─
+
+
+def is_legacy_flat_task_dir(work_dir: str, dir_path: str | Path) -> bool:
+    """Check if *dir_path* is an old-style flat task dir under *work_dir*.
+
+    Old layout: ``<work_dir>/<task_id>/`` (flat, no ``tasks/`` subdir).
+    """
+    if not is_safe_child_path(work_dir, dir_path):
+        return False
+    name = Path(dir_path).name
+    if not is_valid_task_dir_name(name):
+        return False
+    # If there's a tasks/ dir in work_dir, this is V8.2 layout already
+    tasks_dir = _get_tasks_base(work_dir)
+    if tasks_dir.is_dir():
+        return False
+    return True

@@ -88,7 +88,8 @@ Strict-Transport-Security: max-age=31536000; includeSubDomains
 
 - **非 root 运行**：systemd 使用专用低权限用户
 - **工作目录隔离**：shell 任务限制在 `work_dir/<task_id>/` 下
-- **工作目录清理**：自动清理 `work_dir/<task_id>/` 中的临时文件（详见 README 清理策略）
+- **工作目录清理**：自动清理 `work_dir/tasks/<task_id>/` 中的临时文件
+  （详见 README 清理策略 — 支持按状态保留、大小上限、磁盘压力上报）
 - **Hermes workspace 限制**：只能使用配置中指定的目录
 - **Hermes workspace 不受 cleanup 影响**：`allowed_hermes_workspaces` 不会被自动清理
 - **进程组清理**：超时后 kill 整个进程组

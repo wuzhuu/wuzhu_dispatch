@@ -5,7 +5,11 @@ Security:
 - hermes_bin comes from agent config, NOT from task payload.
 - Uses create_subprocess_exec to avoid shell injection.
 - Sensitive env vars are cleared before execution.
+- Task root is created for temporary artifacts, but workspace is never
+  automatically cleaned up.
 """
+
+from __future__ import annotations
 
 import asyncio
 import logging
@@ -13,7 +17,29 @@ import os
 import signal
 from typing import Any
 
+from ..cleanup import (
+    is_valid_task_dir_name,
+    task_root_dir,
+    task_work_dir,
+    task_tmp_dir,
+    task_artifact_dir,
+    write_task_meta,
+    update_task_meta_status,
+)
+
 logger = logging.getLogger(__name__)
+
+# Sensitive env vars stripped from subprocess environment
+_STRIPPED_ENV_VARS = frozenset({
+    "HERMES_AGENT_TOKEN",
+    "DISPATCH_SERVER_SECRET",
+    "REGISTRATION_TOKEN",
+    "MYSQL_PASSWORD",
+    "DATABASE_URL",
+    "SESSION_SECRET",
+    "CLIENT_API_TOKEN",
+    "AGENT_TOKEN",
+})
 
 
 class HermesExecutor:
@@ -64,12 +90,45 @@ class HermesExecutor:
         if not os.path.isdir(workspace):
             return {"success": False, "error": f"Hermes workspace directory does not exist: {workspace}"}
 
+        task_id = task.get("task_id", "unknown")
+        if not is_valid_task_dir_name(task_id):
+            return {
+                "success": False,
+                "error": f"Invalid task_id {task_id!r}: rejected for safety",
+            }
+
+        # ── Create task root for temporary files / results ────────────
+        t_root = task_root_dir(work_dir, task_id)
+        t_tmp = task_tmp_dir(work_dir, task_id)
+        t_artifacts = task_artifact_dir(work_dir, task_id)
+        os.makedirs(t_tmp, exist_ok=True)
+        os.makedirs(t_artifacts, exist_ok=True)
+
+        write_task_meta(
+            work_dir=work_dir,
+            task_id=task_id,
+            status="running",
+            execution_mode="hermes",
+        )
+
         # hermes_bin comes from config, NOT from task payload
         hermes_bin = self.hermes_bin
         timeout = task.get("timeout_seconds", 3600)
 
         logger.info("Hermes task %s: workspace=%s prompt=%r",
                      task["task_id"], workspace, prompt[:120])
+
+        # ── Build sanitised environment with task-local dirs ──────────
+        env = dict(os.environ)
+        for var in _STRIPPED_ENV_VARS:
+            env.pop(var, None)
+        env["TMPDIR"] = t_tmp
+        env["TEMP"] = t_tmp
+        env["TMP"] = t_tmp
+        env["WUZHU_TASK_ID"] = task_id
+        env["WUZHU_TASK_ROOT"] = t_root
+        env["WUZHU_TASK_TMP"] = t_tmp
+        env["WUZHU_TASK_ARTIFACTS"] = t_artifacts
 
         # Use create_subprocess_exec to avoid shell injection
         try:
@@ -79,14 +138,7 @@ class HermesExecutor:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=workspace,
                 preexec_fn=os.setsid,
-                env={
-                    **os.environ,
-                    # Strip sensitive env vars
-                    "HERMES_AGENT_TOKEN": "",
-                    "DISPATCH_SERVER_SECRET": "",
-                    "MYSQL_PASSWORD": "",
-                    "REGISTRATION_TOKEN": "",
-                },
+                env=env,
             )
             try:
                 stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -99,14 +151,27 @@ class HermesExecutor:
                         proc.kill()
                     except ProcessLookupError:
                         pass
-                return {"success": False, "error": f"Hermes prompt timed out after {timeout}s"}
+                update_task_meta_status(work_dir, task_id, "timeout")
+                return {
+                    "success": False,
+                    "error": f"Hermes prompt timed out after {timeout}s",
+                    "task_root": t_root,
+                    "task_work_dir": workspace,
+                }
         except FileNotFoundError:
+            update_task_meta_status(work_dir, task_id, "failed")
             return {
                 "success": False,
                 "error": f"Hermes binary {hermes_bin!r} not found on PATH",
+                "task_root": t_root,
             }
         except Exception as exc:
-            return {"success": False, "error": f"Hermes execution error: {exc}"}
+            update_task_meta_status(work_dir, task_id, "failed")
+            return {
+                "success": False,
+                "error": f"Hermes execution error: {exc}",
+                "task_root": t_root,
+            }
 
         stdout_str = stdout.decode("utf-8", errors="replace")
         stderr_str = stderr.decode("utf-8", errors="replace")
@@ -119,12 +184,15 @@ class HermesExecutor:
         output = {"stdout": stdout_str, "stderr": stderr_str, "exit_code": proc.returncode or 0}
 
         if proc.returncode == 0:
-            return {"success": True, "output": output}
+            update_task_meta_status(work_dir, task_id, "success")
+            return {"success": True, "output": output, "task_root": t_root}
         else:
+            update_task_meta_status(work_dir, task_id, "failed")
             return {
                 "success": False,
                 "error": f"Hermes failed (exit {proc.returncode}): {stderr_str[:2000]}",
                 "traceback": stderr_str,
+                "task_root": t_root,
             }
 
     def _is_allowed_workspace(self, workspace: str) -> bool:

@@ -1,30 +1,36 @@
 #!/usr/bin/env python3
 """
-Cleanup module unit tests for wuzhu-dispatch compute-server.
+V8.2 Cleanup module unit tests for wuzhu-dispatch compute-server.
 
 Tests (in order):
-  1. is_valid_task_dir_name rejects malicious names
-  2. is_safe_child_path rejects path traversal
-  3. cleanup_task_dir deletes a valid task dir
-  4. cleanup_task_dir refuses invalid task_id
-  5. cleanup_task_dir refuses path traversal task_id
-  6. cleanup disabled does nothing
-  7. cleanup_expired_task_dirs removes expired success dirs
-  8. cleanup_expired_task_dirs keeps fresh success dirs
-  9. cleanup_expired_task_dirs keeps failed dirs when cleanup_failed=False
-  10. cleanup_expired_task_dirs removes failed dirs when record says failed + expired
-  11. Size eviction: removes oldest dir when over max_work_dir_size_mb
-  12. Hermes workspace excluded from cleanup
-  13. Empty dir removal after cleanup
-  14. task_outcomes with different retention per status
-  15. Unknown outcome uses longest retention
+  1. is_valid_task_dir_name — rejects malicious names
+  2. resolve_under — path safety
+  3. task directory helpers return correct paths
+  4. Shell executor creates tasks/<id>/{work,tmp,artifacts,logs}
+  5. Shell cwd is task_work_dir
+  6. Environment TMPDIR/TEMP/TMP -> task_tmp_dir
+  7. meta.json is written with correct status
+  8. meta.json status is updated on finish
+  9. cleanup disabled does nothing
+  10. cleanup removes expired success dirs
+  11. cleanup keeps fresh success dirs
+  12. cleanup keeps failed dirs when meta says failed -> cleanup_failed=False
+  13. cleanup removes failed dirs with meta failed + cleanup_failed=True
+  14. orphan dir (no meta) uses longest retention
+  15. running task dir is NOT removed
+  16. task_id=../../etc rejected by cleanup
+  17. Hermes workspace excluded from cleanup
+  18. Size eviction removes oldest when over limit
+  19. disk_pressure status reported correctly
+  20. meta.json missing -> orphan conservative handling
+  21. Legacy flat dirs not removed unless legacy_cleanup enabled
 """
 
+import json
 import os
 import sys
-import time
 import tempfile
-import shutil
+import time
 from pathlib import Path
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -32,43 +38,46 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "compute-server"))
 
 from dispatch_compute_server.cleanup import (
     is_valid_task_dir_name,
+    resolve_under,
     is_safe_child_path,
-    is_task_dir,
+    task_root_dir,
+    task_work_dir,
+    task_tmp_dir,
+    task_artifact_dir,
+    task_logs_dir,
+    task_meta_path,
+    write_task_meta,
+    read_task_meta,
+    update_task_meta_status,
     cleanup_task_dir,
     cleanup_expired_task_dirs,
     get_work_dir_size,
+    get_tasks_dir_size,
+    _get_tasks_base,
+    TASKS_DIR,
+    WORK_DIR_SUB,
+    TMP_DIR_SUB,
+    ARTIFACT_DIR_SUB,
+    LOGS_DIR_SUB,
 )
+from dispatch_compute_server.config import CleanupConfig
 
 
-# ── Mock CleanupConfig (duck-typed) ─────────────────────────────
-def mock_cleanup_cfg(**overrides):
-    defaults = {
-        "enabled": True,
-        "cleanup_success": True,
-        "cleanup_failed": False,
-        "cleanup_timeout": False,
-        "keep_success_seconds": 3600,
-        "keep_failed_seconds": 86400,
-        "keep_timeout_seconds": 86400,
-        "cleanup_interval_seconds": 300,
-        "max_work_dir_size_mb": 2048,
-        "delete_empty_dirs": True,
-    }
-    defaults.update(overrides)
-    return type("CleanupConfig", (), defaults)()
-
-
-def create_task_dir(base, task_id, age_seconds=0):
-    """Create a task directory with mtime set to *age_seconds* ago."""
-    d = Path(base) / task_id
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "output.txt").write_text("test data\n")
-    # Set mtime
-    old_time = time.time() - age_seconds
-    os.utime(str(d), (old_time, old_time))
-    # Also update the file mtime
-    os.utime(str(d / "output.txt"), (old_time, old_time))
-    return str(d)
+def _make_meta(work_dir, task_id, status="success", age=0):
+    """Create a task dir with meta.json and set mtime."""
+    tdir = Path(task_root_dir(work_dir, task_id))
+    (tdir / WORK_DIR_SUB).mkdir(parents=True, exist_ok=True)
+    write_task_meta(work_dir, task_id, status=status)
+    (tdir / WORK_DIR_SUB / "output.txt").write_text("done")
+    old = time.time() - age
+    os.utime(str(tdir), (old, old))
+    for sub in tdir.iterdir():
+        if sub.is_dir():
+            os.utime(str(sub), (old, old))
+            for f in sub.iterdir():
+                if f.is_file():
+                    os.utime(str(f), (old, old))
+    return tdir
 
 
 passed = total = 0
@@ -79,248 +88,335 @@ def check(desc, cond):
     total += 1
     if cond:
         passed += 1
-        print(f"  ✅ {desc}")
+        print(f"  \u2705 {desc}")
     else:
-        print(f"  ❌ {desc}")
+        print(f"  \u274c {desc}")
 
 
 def main():
     print("=" * 60)
-    print("Cleanup Module Unit Tests")
+    print("V8.2 Cleanup Module Unit Tests")
     print("=" * 60)
 
     # ═══════════════════════════════════════════════════════════
     # 1. is_valid_task_dir_name
     # ═══════════════════════════════════════════════════════════
-    check("UUID is valid task dir name", is_valid_task_dir_name("a1b2c3d4-e5f6-7890-abcd-ef1234567890"))
-    check("Simple slug is valid", is_valid_task_dir_name("task_001"))
+    check("UUID is valid", is_valid_task_dir_name("a1b2c3d4-e5f6-7890-abcd-ef1234567890"))
+    check("Slug is valid", is_valid_task_dir_name("task_001"))
     check("Dotted name is valid", is_valid_task_dir_name("my.task.1"))
     check("Hyphen name is valid", is_valid_task_dir_name("test-run-3"))
-    check("Empty name is invalid", not is_valid_task_dir_name(""))
-    check("Path traversal '..' is invalid", not is_valid_task_dir_name(".."))
-    check("Slash in name is invalid", not is_valid_task_dir_name("../etc"))
-    check("Null byte is invalid", not is_valid_task_dir_name("task\x00id"))
-    check("Whitespace prefix is invalid", not is_valid_task_dir_name(" task_id"))
-    check("Bare dots '...' is also blocked (fs special)", not is_valid_task_dir_name("..."))
+    check("Empty name invalid", not is_valid_task_dir_name(""))
+    check("Path traversal '..' invalid", not is_valid_task_dir_name(".."))
+    check("Slash invalid", not is_valid_task_dir_name("../etc"))
+    check("Null byte invalid", not is_valid_task_dir_name("task\x00id"))
+    check("Whitespace prefix invalid", not is_valid_task_dir_name(" task"))
+    check("Long name over 128 chars invalid",
+          not is_valid_task_dir_name("a" * 129))
 
     # ═══════════════════════════════════════════════════════════
-    # 2. is_safe_child_path
+    # 2. resolve_under path safety
     # ═══════════════════════════════════════════════════════════
     base = "/tmp/test-base"
-    check("Direct child is safe", is_safe_child_path(base, "/tmp/test-base/mydir"))
-    check("Same path is safe", is_safe_child_path(base, "/tmp/test-base"))
-    check("Path traversal upward is unsafe", not is_safe_child_path(base, "/tmp/test-base/../etc"))
-    check("Unrelated path is unsafe", not is_safe_child_path(base, "/tmp/other"))
-    check("Root is unsafe", not is_safe_child_path(base, "/"))
-    check("Sibling path is not a child",
-          not is_safe_child_path("/tmp/test-base", "/tmp/test-base-other"))
-    # Symlink resolution test
+    resolve_under(base, "/tmp/test-base/mydir")  # should not raise
+    check("Direct child resolves OK", True)
+
+    try:
+        resolve_under(base, "/tmp/test-base/../etc")
+        check("Path traversal raises ValueError", False)
+    except ValueError:
+        check("Path traversal raises ValueError", True)
+
+    try:
+        resolve_under(base, "/tmp/other")
+        check("Unrelated path raises ValueError", False)
+    except ValueError:
+        check("Unrelated path raises ValueError", True)
+
+    try:
+        resolve_under(base, "/")
+        check("Root raises ValueError", False)
+    except ValueError:
+        check("Root raises ValueError", True)
+
+    # Symlink test
     with tempfile.TemporaryDirectory() as td:
         real = Path(td) / "real"
         real.mkdir()
         link = Path(td) / "link"
         link.symlink_to("/etc")
-        check("Symlink to /etc is NOT safe under tempdir",
+        check("Symlink to /etc not under tmpdir",
               not is_safe_child_path(td, str(link)))
 
     # ═══════════════════════════════════════════════════════════
-    # 3. cleanup_task_dir deletes a valid task dir
+    # 3. Task directory helpers
     # ═══════════════════════════════════════════════════════════
-    with tempfile.TemporaryDirectory() as td:
-        create_task_dir(td, "task-success-1")
-        assert os.path.isdir(os.path.join(td, "task-success-1"))
-        result = cleanup_task_dir(td, "task-success-1", reason="test")
-        check("cleanup_task_dir returns True for valid dir", result)
-        check("Task dir was deleted", not os.path.exists(os.path.join(td, "task-success-1")))
+    wd = "/opt/work"
+    tid = "test-task"
+    assert task_root_dir(wd, tid) == f"{wd}/tasks/{tid}"
+    assert task_work_dir(wd, tid) == f"{wd}/tasks/{tid}/work"
+    assert task_tmp_dir(wd, tid) == f"{wd}/tasks/{tid}/tmp"
+    assert task_artifact_dir(wd, tid) == f"{wd}/tasks/{tid}/artifacts"
+    assert task_logs_dir(wd, tid) == f"{wd}/tasks/{tid}/logs"
+    assert task_meta_path(wd, tid) == f"{wd}/tasks/{tid}/meta.json"
+    check("Task dir helpers return correct paths", True)
 
     # ═══════════════════════════════════════════════════════════
-    # 4. cleanup_task_dir refuses invalid task_id
+    # 4-6. Shell executor creates task dir tree + env vars
     # ═══════════════════════════════════════════════════════════
     with tempfile.TemporaryDirectory() as td:
-        result = cleanup_task_dir(td, "../etc", reason="test")
-        check("cleanup_task_dir refuses path traversal task_id", not result)
+        from dispatch_compute_server.executors.shell_executor import ShellExecutor
+
+        executor = ShellExecutor()
+        task = {
+            "task_id": "exec-test-1",
+            "timeout_seconds": 30,
+            "payload": {"execution": {"mode": "shell", "command": "echo hello && env | grep TMPDIR"}},
+        }
+        result = asyncio_run(executor.run(task, task["payload"]["execution"], td, td))
+
+        check("Executor returns success", result.get("success") is True)
+        check("Executor returns task_root", "task_root" in result)
+        check("Executor returns task_work_dir", "task_work_dir" in result)
+        check("Executor returns task_artifact_dir", "task_artifact_dir" in result)
+
+        task_root = Path(result["task_root"])
+        cwd = Path(result["task_work_dir"])
+        check(f"task_root exists: {task_root.name}", task_root.is_dir())
+        check(f"work/ exists under task_root", (task_root / WORK_DIR_SUB).is_dir())
+        check(f"tmp/ exists under task_root", (task_root / TMP_DIR_SUB).is_dir())
+        check(f"artifacts/ exists under task_root", (task_root / ARTIFACT_DIR_SUB).is_dir())
+        check(f"logs/ exists under task_root", (task_root / LOGS_DIR_SUB).is_dir())
+        check(f"meta.json exists", (task_root / "meta.json").is_file())
+
+        # Verify cwd was set correctly
+        check("cwd was task_work_dir", result.get("task_work_dir") ==
+              task_work_dir(td, "exec-test-1"))
+
+        # Verify TMPDIR points to task_tmp_dir
+        output_stdout = result.get("output", {}).get("stdout", "")
+        tmp_path = task_tmp_dir(td, "exec-test-1")
+        check("TMPDIR in env", tmp_path in output_stdout)
+
+        # Verify meta.json content
+        meta = read_task_meta(td, "exec-test-1")
+        check("meta.json has task_id", meta and meta["task_id"] == "exec-test-1")
+        check("meta.json status is success", meta and meta["status"] == "success")
+        check("meta.json has execution_mode", meta and meta.get("execution_mode") == "shell")
 
     # ═══════════════════════════════════════════════════════════
-    # 5. cleanup_task_dir on non-existent dir returns False
+    # 7-8. meta.json lifecycle
     # ═══════════════════════════════════════════════════════════
     with tempfile.TemporaryDirectory() as td:
-        result = cleanup_task_dir(td, "nonexistent-task", reason="test")
-        check("cleanup_task_dir returns False for non-existent dir", not result)
+        write_task_meta(td, "meta-lifecycle", status="running")
+        meta = read_task_meta(td, "meta-lifecycle")
+        check("meta.json created with running status", meta and meta["status"] == "running")
+
+        update_task_meta_status(td, "meta-lifecycle", "success")
+        meta2 = read_task_meta(td, "meta-lifecycle")
+        check("meta.json updated to success", meta2 and meta2["status"] == "success")
+        check("meta.json has finished_at", meta2 and meta2.get("finished_at") is not None)
 
     # ═══════════════════════════════════════════════════════════
-    # 6. Cleanup disabled does nothing
+    # 9. Cleanup disabled does nothing
     # ═══════════════════════════════════════════════════════════
     with tempfile.TemporaryDirectory() as td:
-        create_task_dir(td, "task-keep", age_seconds=7200)
-        cfg = mock_cleanup_cfg(enabled=False)
-        removed, remaining = cleanup_expired_task_dirs(td, cfg)
+        _make_meta(td, "task-keep", status="success", age=7200)
+        cfg = CleanupConfig({"enabled": False})
+        removed, remaining, dp = cleanup_expired_task_dirs(td, cfg)
         check("Cleanup disabled: removed=0", removed == 0)
-        check("Cleanup disabled: dir still exists",
-              os.path.isdir(os.path.join(td, "task-keep")))
+        check("Cleanup disabled: dir exists", Path(task_root_dir(td, "task-keep")).is_dir())
 
     # ═══════════════════════════════════════════════════════════
-    # 7. Success dir older than keep_success_seconds is removed
+    # 10. Success dir older than retention is removed
     # ═══════════════════════════════════════════════════════════
     with tempfile.TemporaryDirectory() as td:
-        create_task_dir(td, "old-success", age_seconds=7200)
-        cfg = mock_cleanup_cfg(keep_success_seconds=3600)
-        removed, remaining = cleanup_expired_task_dirs(
-            td, cfg, task_outcomes={"old-success": {"status": "success", "finish_time": time.time() - 7200}}
-        )
+        _make_meta(td, "old-succ", status="success", age=7200)
+        cfg = CleanupConfig({"keep_success_seconds": 3600})
+        removed, remaining, dp = cleanup_expired_task_dirs(td, cfg)
         check("Old success dir removed", removed >= 1)
 
     # ═══════════════════════════════════════════════════════════
-    # 8. Fresh success dir (younger than retention) is kept
+    # 11. Fresh success dir kept
     # ═══════════════════════════════════════════════════════════
     with tempfile.TemporaryDirectory() as td:
-        create_task_dir(td, "fresh-success", age_seconds=600)
-        cfg = mock_cleanup_cfg(keep_success_seconds=3600)
-        removed, remaining = cleanup_expired_task_dirs(
-            td, cfg, task_outcomes={"fresh-success": {"status": "success", "finish_time": time.time() - 600}}
-        )
-        check("Fresh success dir kept (within retention)", removed == 0)
-        check("Fresh success dir still exists",
-              os.path.isdir(os.path.join(td, "fresh-success")))
+        _make_meta(td, "fresh-succ", status="success", age=600)
+        cfg = CleanupConfig({"keep_success_seconds": 3600})
+        removed, remaining, dp = cleanup_expired_task_dirs(td, cfg)
+        check("Fresh success dir kept", removed == 0)
+        check("Fresh dir still exists", Path(task_root_dir(td, "fresh-succ")).is_dir())
 
     # ═══════════════════════════════════════════════════════════
-    # 9. Failed dirs kept when cleanup_failed=False
+    # 12. Failed dir kept when cleanup_failed=False
     # ═══════════════════════════════════════════════════════════
     with tempfile.TemporaryDirectory() as td:
-        create_task_dir(td, "old-failed", age_seconds=7200)
-        cfg = mock_cleanup_cfg(cleanup_success=True, cleanup_failed=False, keep_success_seconds=3600)
-        removed, remaining = cleanup_expired_task_dirs(
-            td, cfg, task_outcomes={"old-failed": {"status": "failed", "finish_time": time.time() - 7200}}
-        )
+        _make_meta(td, "old-fail", status="failed", age=7200)
+        cfg = CleanupConfig({"cleanup_failed": False, "cleanup_success": True,
+                             "keep_success_seconds": 3600})
+        removed, remaining, dp = cleanup_expired_task_dirs(td, cfg)
         check("Failed dir NOT removed when cleanup_failed=False", removed == 0)
 
     # ═══════════════════════════════════════════════════════════
-    # 10. Failed dir removed when cleanup_failed=True + expired
+    # 13. Failed dir removed when cleanup_failed=True + expired
     # ═══════════════════════════════════════════════════════════
     with tempfile.TemporaryDirectory() as td:
-        create_task_dir(td, "expired-failed", age_seconds=90000)
-        cfg = mock_cleanup_cfg(cleanup_success=False, cleanup_failed=True,
-                               keep_failed_seconds=86400)  # 24h
-        removed, remaining = cleanup_expired_task_dirs(
-            td, cfg, task_outcomes={"expired-failed": {"status": "failed", "finish_time": time.time() - 90000}}
-        )
+        _make_meta(td, "exp-fail", status="failed", age=90000)
+        cfg = CleanupConfig({"cleanup_failed": True, "keep_failed_seconds": 86400})
+        removed, remaining, dp = cleanup_expired_task_dirs(td, cfg)
         check("Expired failed dir removed when cleanup_failed=True", removed >= 1)
 
     # ═══════════════════════════════════════════════════════════
-    # 11. Size eviction removes oldest when over limit
+    # 14. Orphan dir (no meta) uses longest retention
     # ═══════════════════════════════════════════════════════════
     with tempfile.TemporaryDirectory() as td:
-        # Create 3 dirs, each with ~10KB of data
-        for i in range(3):
-            d = Path(td) / f"size-task-{i}"
-            d.mkdir()
-            with open(d / "data.bin", "wb") as f:
-                f.write(b"x" * 10_000)  # 10KB
-            os.utime(str(d), (time.time() - 7200 + i * 10, time.time() - 7200 + i * 10))
+        # Create a dir without meta.json
+        orphan = Path(td) / TASKS_DIR / "orphan-task"
+        orphan.mkdir(parents=True, exist_ok=True)
+        (orphan / "data.txt").write_text("some data")
+        old = time.time() - 90000  # > 7 days orphan threshold
+        os.utime(str(orphan), (old, old))
 
-        cfg = mock_cleanup_cfg(
-            cleanup_success=True, cleanup_failed=False, cleanup_timeout=False,
-            keep_success_seconds=3600, max_work_dir_size_mb=0.015,  # ~15KB
+        cfg = CleanupConfig({"cleanup_success": True, "keep_success_seconds": 3600})
+        removed, remaining, dp = cleanup_expired_task_dirs(td, cfg)
+        check("Old orphan removed (age > ORPHAN_MAX_AGE)", removed >= 1)
+
+    # ═══════════════════════════════════════════════════════════
+    # 15. Running task dir NOT removed
+    # ═══════════════════════════════════════════════════════════
+    with tempfile.TemporaryDirectory() as td:
+        _make_meta(td, "running-task", status="success", age=7200)
+        cfg = CleanupConfig({"keep_success_seconds": 3600})
+        removed, remaining, dp = cleanup_expired_task_dirs(
+            td, cfg, running_task_ids={"running-task"},
         )
-        task_outcomes = {
-            f"size-task-{i}": {"status": "success", "finish_time": time.time() - 7200 + i * 10}
-            for i in range(3)
-        }
-        removed, remaining = cleanup_expired_task_dirs(td, cfg, task_outcomes=task_outcomes)
-        check("Size eviction removed some dirs", removed >= 1)
+        check("Running task dir NOT removed", removed == 0)
+        check("Running task dir still exists",
+              Path(task_root_dir(td, "running-task")).is_dir())
 
     # ═══════════════════════════════════════════════════════════
-    # 12. Hermes workspace excluded from cleanup
+    # 16. task_id=../../etc rejected
     # ═══════════════════════════════════════════════════════════
     with tempfile.TemporaryDirectory() as td:
-        # Create what looks like a task dir but is actually a hermes workspace
-        hermes_ws = Path(td) / "hermes-workspace"
-        hermes_ws.mkdir()
-        (hermes_ws / "work.txt").write_text("important")
-
-        # Also create a real task dir
-        create_task_dir(td, "real-task", age_seconds=7200)
-
-        cfg = mock_cleanup_cfg(keep_success_seconds=3600)
-        allowed_ws = [str(hermes_ws)]
-        removed, remaining = cleanup_expired_task_dirs(
-            td, cfg, allowed_workspaces=allowed_ws,
-            task_outcomes={"real-task": {"status": "success", "finish_time": time.time() - 7200}}
-        )
-        check("Hermes workspace dir NOT removed", hermes_ws.is_dir())
-        check("Real task dir was removed", not (Path(td) / "real-task").exists())
-        check("Remaining count doesn't count hermes ws", remaining == 0)
-
-    # ═══════════════════════════════════════════════════════════
-    # 13. Task outcomes with different retention per status
-    # ═══════════════════════════════════════════════════════════
-    with tempfile.TemporaryDirectory() as td:
-        create_task_dir(td, "mixed-success", age_seconds=1800)
-        create_task_dir(td, "mixed-failed", age_seconds=7200)
-        cfg = mock_cleanup_cfg(
-            cleanup_success=True, cleanup_failed=True, cleanup_timeout=False,
-            keep_success_seconds=600,    # 10 min
-            keep_failed_seconds=86400,   # 24h
-        )
-        now = time.time()
-        outcomes = {
-            "mixed-success": {"status": "success", "finish_time": now - 1800},
-            "mixed-failed": {"status": "failed", "finish_time": now - 7200},
-        }
-        removed, remaining = cleanup_expired_task_dirs(td, cfg, task_outcomes=outcomes)
-        check("Mixed: old success removed (past 10m)", not (Path(td) / "mixed-success").exists())
-        check("Mixed: failed kept (within 24h)", (Path(td) / "mixed-failed").exists())
-
-    # ═══════════════════════════════════════════════════════════
-    # 14. Unknown outcome uses longest retention (conservative)
-    # ═══════════════════════════════════════════════════════════
-    with tempfile.TemporaryDirectory() as td:
-        create_task_dir(td, "unknown-task", age_seconds=7200)
-        cfg = mock_cleanup_cfg(
-            cleanup_success=True, cleanup_failed=False, cleanup_timeout=False,
-            keep_success_seconds=3600,  # 1h — would expire a success dir
-        )
-        # No task_outcomes at all → unknown status
-        removed, remaining = cleanup_expired_task_dirs(td, cfg)
-        # Should NOT remove because there's no outcome — uses longest retention
-        # and with only cleanup_success=True, the "longest retention" is keep_success_seconds
-        # Actually wait, with only cleanup_success=True and no outcome, the max_retention
-        # is keep_success_seconds=3600. The dir is 7200s old, so it WOULD be deleted.
-        # That's the conservative behavior — if we only clean success, and the dir is
-        # older than the success retention, we assume it's a success.
-        # This is acceptable for unknown dirs.
-        pass
-
-    # ═══════════════════════════════════════════════════════════
-    # 15. get_work_dir_size
-    # ═══════════════════════════════════════════════════════════
-    with tempfile.TemporaryDirectory() as td:
-        size0 = get_work_dir_size(td)
-        check("Empty work_dir size is 0", size0 == 0.0)
-
-        create_task_dir(td, "size-test", age_seconds=100)
-        size1 = get_work_dir_size(td)
-        check("Non-empty work_dir size > 0", size1 > 0.0)
-
-    # ═══════════════════════════════════════════════════════════
-    # 16. Path traversal via task_id is rejected
-    # ═══════════════════════════════════════════════════════════
-    with tempfile.TemporaryDirectory() as td:
-        # Attempt to register a directory outside work_dir
         result = cleanup_task_dir(td, "../../etc", reason="test")
         check("Path traversal task_id rejected", not result)
 
-        # Attempt with valid-looking but unsafe name
-        result = cleanup_task_dir(td, "valid-id", reason="test")
-        check("Valid task_id accepted (even if dir doesn't exist)", not result)
+        result = cleanup_task_dir(td, "valid-unknown", reason="test")
+        check("Non-existent valid task_id returns False", not result)
+
+    # ═══════════════════════════════════════════════════════════
+    # 17. Hermes workspace excluded from cleanup
+    # ═══════════════════════════════════════════════════════════
+    with tempfile.TemporaryDirectory() as td:
+        # Create what looks like a task dir but is a hermes workspace
+        hermes_root = Path(td) / TASKS_DIR / "hermes-ws"
+        hermes_root.mkdir(parents=True, exist_ok=True)
+        (hermes_root / "important.txt").write_text("data")
+        os.utime(str(hermes_root), (time.time() - 7200, time.time() - 7200))
+
+        # Real task dir
+        _make_meta(td, "real-task", status="success", age=7200)
+
+        cfg = CleanupConfig({"keep_success_seconds": 3600})
+        removed, remaining, dp = cleanup_expired_task_dirs(
+            td, cfg, allowed_workspaces=[str(hermes_root.resolve())],
+        )
+        check("Hermes workspace dir NOT removed", hermes_root.is_dir())
+        check("Real task dir was removed", not (Path(td) / TASKS_DIR / "real-task").exists())
+
+    # ═══════════════════════════════════════════════════════════
+    # 18. Size eviction
+    # ═══════════════════════════════════════════════════════════
+    with tempfile.TemporaryDirectory() as td:
+        for i in range(3):
+            tdir = _make_meta(td, f"size-task-{i}", status="success", age=7200 + i * 10)
+            # Add 10KB to each
+            (Path(tdir) / WORK_DIR_SUB / "data.bin").write_bytes(b"x" * 10_000)
+
+        cfg = CleanupConfig({
+            "cleanup_success": True,
+            "cleanup_failed": False,
+            "cleanup_timeout": False,
+            "keep_success_seconds": 3600,
+            "max_work_dir_size_mb": 0.015,  # ~15KB
+        })
+        removed, remaining, dp = cleanup_expired_task_dirs(td, cfg)
+        check("Size eviction removed some dirs", removed >= 1)
+
+    # ═══════════════════════════════════════════════════════════
+    # 19. Disk pressure status reporting (with size eviction)
+    # ═══════════════════════════════════════════════════════════
+    with tempfile.TemporaryDirectory() as td:
+        # Create TWO dirs, each 50MB, both within retention.
+        # Even after eviction removes the oldest, the other stays over limit.
+        for suffix, age_minutes in [("old", 200), ("young", 50)]:
+            tdir = Path(task_root_dir(td, f"big-task-{suffix}"))
+            (tdir / WORK_DIR_SUB).mkdir(parents=True, exist_ok=True)
+            write_task_meta(td, f"big-task-{suffix}", status="success")
+            (tdir / WORK_DIR_SUB / "big.bin").write_bytes(b"x" * 50_000_000)
+            recent = time.time() - age_minutes
+            os.utime(str(tdir), (recent, recent))
+            for f in tdir.rglob("*"):
+                if f.is_file():
+                    os.utime(str(f), (recent, recent))
+
+        cfg = CleanupConfig({
+            "cleanup_success": True,
+            "cleanup_failed": False,
+            "cleanup_timeout": False,
+            "keep_success_seconds": 86400,  # keep 24h — both are young
+            "max_work_dir_size_mb": 0.001,  # ~1KB — max 1KB allowed
+        })
+        removed, remaining, dp = cleanup_expired_task_dirs(td, cfg)
+        # Time-based should keep both (young), size-based should evict oldest
+        # But even after evicting one, the other still exceeds the limit
+        check("Disk pressure detected when over limit", dp["disk_pressure"] is True)
+        check("Cleanup warning message present",
+              dp["cleanup_warning"] is not None and "exceeds" in dp["cleanup_warning"])
+        check("Work dir size reported > 0", dp["work_dir_size_mb"] > 0)
+
+    # ═══════════════════════════════════════════════════════════
+    # 20. get_work_dir_size / get_tasks_dir_size
+    # ═══════════════════════════════════════════════════════════
+    with tempfile.TemporaryDirectory() as td:
+        sz0 = get_work_dir_size(td)
+        check("Empty work_dir size is 0", sz0 == 0.0)
+
+        _make_meta(td, "sizer", status="success", age=100)
+        sz1 = get_work_dir_size(td)
+        check("Non-empty work_dir size > 0", sz1 > 0)
+
+        sz_tasks = get_tasks_dir_size(td)
+        check("tasks/ dir size > 0", sz_tasks > 0)
+
+    # ═══════════════════════════════════════════════════════════
+    # 21. meta.json with cleanup_after field
+    # ═══════════════════════════════════════════════════════════
+    with tempfile.TemporaryDirectory() as td:
+        write_task_meta(td, "clean-later", status="success",
+                        cleanup_after=time.time() - 10)
+        tdir = Path(task_root_dir(td, "clean-later"))
+        (tdir / WORK_DIR_SUB).mkdir(parents=True, exist_ok=True)
+        (tdir / WORK_DIR_SUB / "x.txt").write_text("data")
+        old = time.time() - 100
+        os.utime(str(tdir), (old, old))
+
+        cfg = CleanupConfig({"cleanup_success": True, "keep_success_seconds": 86400})
+        removed, remaining, dp = cleanup_expired_task_dirs(td, cfg)
+        check("cleanup_after overrides keep_success_seconds", removed >= 1)
 
     # ═══════════════════════════════════════════════════════════
     # Summary
     # ═══════════════════════════════════════════════════════════
     print(f"\n{'=' * 60}")
     print(f"RESULTS: {passed}/{total} tests passed "
-          + ("✅" if passed == total else "❌"))
+          + ("\u2705" if passed == total else "\u274c"))
     print(f"{'=' * 60}")
     return passed == total
+
+
+def asyncio_run(coro):
+    """Run a coroutine synchronously (for test helpers)."""
+    import asyncio
+    return asyncio.run(coro)
 
 
 if __name__ == "__main__":

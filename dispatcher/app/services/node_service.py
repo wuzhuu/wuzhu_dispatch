@@ -119,12 +119,21 @@ async def process_heartbeat(
     ns.online = True
     ns.last_heartbeat = now
     ns.running_tasks = req.running_tasks
-    ns.status_json = req.status_json
 
     # Lightweight heartbeat: only update online/liveness fields,
     # do NOT overwrite cpu/memory/disk/rx/tx with stale 0 values.
+    # Preserve hardware info from any existing status_json.
     status_json = req.status_json or {}
     is_lightweight = status_json.get("lightweight") is True
+
+    if is_lightweight:
+        # Preserve existing hardware when lightweight overwrites status_json
+        existing_hw = (ns.status_json or {}).get("hardware")
+        ns.status_json = status_json
+        if existing_hw:
+            ns.status_json["hardware"] = existing_hw
+    else:
+        ns.status_json = status_json
 
     if not is_lightweight:
         ns.cpu_usage = req.cpu_usage

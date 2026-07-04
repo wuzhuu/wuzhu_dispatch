@@ -96,6 +96,7 @@ async def dashboard_nodes(
             select(ComputeNodeStatus).where(ComputeNodeStatus.node_id == node.node_id)
         )
         ns = ns_result.scalar_one_or_none()
+        hardware = (ns.status_json or {}).get("hardware", {}) if ns else {}
         nodes.append({
             "node_id": node.node_id,
             "name": node.name,
@@ -108,6 +109,9 @@ async def dashboard_nodes(
             "cpu_usage": ns.cpu_usage if ns else 0,
             "memory_usage": ns.memory_usage if ns else 0,
             "disk_usage": ns.disk_usage if ns else 0,
+            "total_cpu_cores": hardware.get("cpu_cores", 0),
+            "total_memory_mb": hardware.get("memory_mb", 0),
+            "total_disk_mb": hardware.get("disk_mb", 0),
             "running_tasks": ns.running_tasks if ns else 0,
             "rx_mbps": ns.rx_mbps if ns else 0,
             "tx_mbps": ns.tx_mbps if ns else 0,

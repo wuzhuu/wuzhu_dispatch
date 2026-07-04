@@ -52,6 +52,11 @@
     return c;
   }
 
+  function formatResource(usageStr, total, unit) {
+    if (!total) return usageStr;
+    return usageStr + ' (' + total + ' ' + unit + ')';
+  }
+
   // ── Router ─────────────────────────────────────────────────────
   function getPage() {
     var p = window.location.pathname;
@@ -137,9 +142,9 @@
         tdStatus.appendChild(dbadge);
       }
       tr.appendChild(tdStatus);
-      tr.appendChild(td(n.cpu_usage + '%'));
-      tr.appendChild(td(n.memory_usage + '%'));
-      tr.appendChild(td(n.disk_usage + '%'));
+      tr.appendChild(td(formatResource(n.cpu_usage + '%', n.total_cpu_cores, 'cores')));
+      tr.appendChild(td(formatResource(n.memory_usage + '%', n.total_memory_mb, 'MB')));
+      tr.appendChild(td(formatResource(n.disk_usage + '%', n.total_disk_mb, 'MB')));
       tr.appendChild(td(n.running_tasks + '/' + n.max_parallel_tasks));
       tr.appendChild(td(n.rx_mbps.toFixed(1) + '/' + n.tx_mbps.toFixed(1)));
       tr.appendChild(td(n.last_heartbeat ? new Date(n.last_heartbeat).toLocaleString() : '-'));

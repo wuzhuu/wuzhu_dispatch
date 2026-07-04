@@ -375,6 +375,13 @@ async def _pick_best_task(
                              task.task_id, runtime_key, exec_mode)
                 continue
 
+        # ── Target matching ──────────────────────────────────────────
+        task_target = reqs.get("target", {})
+        if isinstance(task_target, dict) and task_target.get("mode") == "node":
+            target_node_id = task_target.get("node_id")
+            if target_node_id and target_node_id != node.node_id:
+                continue
+
         # ── Tag filters ────────────────────────────────────────────
         required_tags = set(reqs.get("required_tags", []))
         node_tags = set(node.tags or [])

@@ -129,10 +129,11 @@ class ClientAuthContext:
     system-level (admin Bearer / valid client API token)."""
 
     def __init__(self, user: User | None = None, is_system: bool = False,
-                 token_id: str | None = None):
+                 token_id: str | None = None, token_scope: list | None = None):
         self.user = user
         self.is_system = is_system
         self.token_id = token_id
+        self.token_scope = token_scope or []
 
     @property
     def user_id(self) -> str | None:
@@ -189,7 +190,10 @@ async def authenticate_client(
             user = user_result.scalar_one_or_none()
             if not user or not user.enabled:
                 raise HTTPException(status_code=403, detail="User disabled")
-            return ClientAuthContext(user=user, token_id=api_token.token_id)
+            return ClientAuthContext(
+                user=user, token_id=api_token.token_id,
+                token_scope=api_token.scope or [],
+            )
 
     # ── Session cookie path ────────────────────────────────────────
     user = await get_current_user_from_session(request, db)
@@ -219,6 +223,93 @@ def require_client_role(min_role: str):
             )
         return ctx
     return _checker
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Client API Token scope / capability validation
+# ═══════════════════════════════════════════════════════════════════
+
+
+def get_token_capabilities(scope: list | None) -> dict:
+    """Extract structured capabilities from ``scope``.
+
+    The scope can be a simple list like ``["task:create"]`` or a dict
+    embedded in the list for JSON column compatibility::
+
+        [{"allowed_templates": ["http_probe"],
+          "max_priority": 50, "max_timeout_seconds": 300}]
+
+    Returns a dict with safe defaults.
+    """
+    caps: dict = {}
+    if scope:
+        for item in scope:
+            if isinstance(item, dict):
+                caps.update(item)
+    return {
+        "allowed_templates": caps.get("allowed_templates", []),
+        "allowed_modes": caps.get("allowed_modes", ["template"]),
+        "denied_modes": caps.get("denied_modes", ["shell", "hermes"]),
+        "allowed_target_tags": caps.get("allowed_target_tags", []),
+        "allowed_node_ids": caps.get("allowed_node_ids", []),
+        "max_priority": caps.get("max_priority", 100),
+        "max_timeout_seconds": caps.get("max_timeout_seconds", 3600),
+        "max_concurrent_tasks": caps.get("max_concurrent_tasks", 10),
+        "max_payload_bytes": caps.get("max_payload_bytes", 65536),
+        "can_target_specific_node": caps.get("can_target_specific_node", False),
+        "allow_internal_network": caps.get("allow_internal_network", False),
+    }
+
+
+def validate_template_allowed(template_id: str, caps: dict):
+    """Raise ``HTTPException(403)`` if template not allowed."""
+    if caps["allowed_templates"] and template_id not in caps["allowed_templates"]:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Template {template_id!r} not in token's allowed_templates",
+        )
+
+
+def validate_target_tags(target_tags: list[str], caps: dict):
+    """Raise ``HTTPException(403)`` if any tag outside allowed."""
+    allowed = caps.get("allowed_target_tags", [])
+    if allowed:
+        for tag in target_tags:
+            if tag not in allowed:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Tag {tag!r} not in token's allowed_target_tags",
+                )
+
+
+def validate_can_target_node(ctx: ClientAuthContext, caps: dict):
+    """Raise ``HTTPException(403)`` if token can't target specific nodes."""
+    if not ctx.is_system and ctx.role not in ("admin", "owner"):
+        if not caps.get("can_target_specific_node", False):
+            raise HTTPException(
+                status_code=403,
+                detail="Token does not allow targeting specific nodes",
+            )
+
+
+def validate_task_timeout(timeout_seconds: int, caps: dict):
+    """Raise ``HTTPException(403)`` if timeout exceeds token limit."""
+    max_timeout = caps.get("max_timeout_seconds", 3600)
+    if timeout_seconds > max_timeout:
+        raise HTTPException(
+            status_code=403,
+            detail=f"timeout_seconds {timeout_seconds} exceeds token limit {max_timeout}",
+        )
+
+
+def validate_task_priority(priority: int, caps: dict):
+    """Raise ``HTTPException(403)`` if priority exceeds token limit."""
+    max_prio = caps.get("max_priority", 100)
+    if priority > max_prio:
+        raise HTTPException(
+            status_code=403,
+            detail=f"priority {priority} exceeds token limit {max_prio}",
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════

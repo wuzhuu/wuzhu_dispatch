@@ -82,13 +82,49 @@ class NodeStatusResponse(BaseModel):
 # ═══════════════════════════════════════════════════════════════════
 
 
+class TargetSpec(BaseModel):
+    """Unified target specification for task scheduling.
+
+    Controls *where* a task runs.
+    """
+    mode: str = Field(default="auto", pattern=r"^(auto|tags|node)$")
+    tags: list[str] = []
+    avoid_tags: list[str] = []
+    node_id: str | None = None
+    requirements: dict[str, Any] = {}
+
+
 class TaskCreateRequest(BaseModel):
-    type: str = Field(..., min_length=1, max_length=128)
+    type: str = Field(default="", min_length=0, max_length=128)
+    template_id: str | None = Field(default=None, max_length=128)
+    params: dict[str, Any] = {}
+    target: TargetSpec = Field(default_factory=TargetSpec)
     priority: int = Field(default=50, ge=0, le=100)
     timeout_seconds: int = Field(default=3600, ge=1)
     max_retries: int = Field(default=3, ge=0)
     requirements: dict[str, Any] = {}
     payload: dict[str, Any] = {}
+
+
+class QuickTaskRequest(BaseModel):
+    """Quick task — create + wait for result up to *wait_seconds*."""
+    template_id: str | None = Field(default=None, max_length=128)
+    params: dict[str, Any] = {}
+    target: TargetSpec = Field(default_factory=TargetSpec)
+    priority: int = Field(default=50, ge=0, le=100)
+    timeout_seconds: int = Field(default=300, ge=1)
+    max_retries: int = Field(default=1, ge=0)
+    requirements: dict[str, Any] = {}
+    payload: dict[str, Any] = {}
+    wait_seconds: int = Field(default=10, ge=1, le=60)
+
+
+class QuickTaskResponse(BaseModel):
+    done: bool
+    task_id: str
+    status: str
+    result: dict[str, Any] | None = None
+    retry_after_seconds: int | None = None
 
 
 class TaskRenewRequest(BaseModel):

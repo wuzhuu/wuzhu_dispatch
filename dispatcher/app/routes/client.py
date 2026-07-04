@@ -20,6 +20,7 @@ from ..auth import (
     validate_task_priority,
     validate_task_timeout,
     validate_template_allowed,
+    validate_mode_allowed,
 )
 from ..database import get_db
 from ..models import Task
@@ -46,7 +47,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/client", tags=["client"])
 
-# ── Template list (unauthenticated, informational) ───────────────
+
+# ── Template list ────────────────────────────────────────────────
 
 
 @router.get("/templates")
@@ -55,7 +57,7 @@ async def client_list_templates():
     return list_templates()
 
 
-# ── Create task (supports templates + direct payload) ────────────
+# ── Create task ──────────────────────────────────────────────────
 
 
 @router.post("/tasks", response_model=TaskResponse)
@@ -69,52 +71,15 @@ async def client_create_task(
 
     Two modes:
       1. **Template** — pass ``template_id`` + ``params`` (+ optional ``target``).
-         The template generates a safe execution payload.  Shell/Hermes are
-         never exposed to the caller.
       2. **Direct** — pass ``type`` + ``payload`` (requires admin for shell/hermes).
     """
     caps = get_token_capabilities(ctx.token_scope)
-
-    # ── Mode 1: Template task ──────────────────────────────────
     if req.template_id:
         return await _create_template_task(db, req, ctx, caps, request)
-
-    # ── Mode 2: Direct task (legacy) ────────────────────────────
-    execution = req.payload.get("execution", {})
-    mode = execution.get("mode", req.payload.get("mode", ""))
-    if mode in ("shell", "hermes"):
-        if not ctx.is_system:
-            from ..auth import _check_role
-            if not _check_role("admin", ctx.role):
-                raise HTTPException(
-                    status_code=403,
-                    detail="Shell/Hermes tasks require 'admin' role",
-                )
-
-    # Enforce token limits on direct tasks too
-    validate_task_priority(req.priority, caps)
-    validate_task_timeout(req.timeout_seconds, caps)
-
-    # Validate target
-    _validate_target(req.target, ctx, caps)
-
-    task = await create_task(
-        db, req,
-        created_by_user_id=ctx.user_id,
-        created_by_client_token_id=ctx.token_id or ("system" if ctx.is_system else None),
-    )
-
-    mode_label = req.type or mode or "direct"
-    await log_audit(
-        db, f"task.create.{mode_label}", user_id=str(ctx.user_id or "system"),
-        target_type="task", target_id=task.task_id,
-        ip_address=request.client.host if request.client else None,
-        detail={"type": req.type, "mode": mode, "priority": req.priority},
-    )
-    return TaskResponse.model_validate(task)
+    return await _create_direct_task(db, req, ctx, caps, request)
 
 
-# ── Quick task: create + wait ────────────────────────────────────
+# ── Quick task ───────────────────────────────────────────────────
 
 
 @router.post("/tasks/quick", response_model=QuickTaskResponse)
@@ -126,16 +91,17 @@ async def client_quick_task(
 ):
     """Create a task and wait briefly for its result.
 
-    Returns ``{done: true, result: ...}`` if the task completes within
-    *wait_seconds*, or ``{done: false, task_id: ..., status: "running"}``
-    if it hasn't finished yet.
+    If *wait_seconds* exceeds the token's ``max_timeout_seconds`` limit,
+    the request is **rejected with 403** (strict).
     """
     caps = get_token_capabilities(ctx.token_scope)
-    max_wait = min(caps.get("max_timeout_seconds", 60), req.wait_seconds)
-    if max_wait < 1:
-        max_wait = 5
+    token_max_wait = caps.get("max_timeout_seconds", 60)
+    if req.wait_seconds > token_max_wait:
+        raise HTTPException(
+            status_code=403,
+            detail=f"wait_seconds {req.wait_seconds} exceeds token limit {token_max_wait}",
+        )
 
-    # Build the create request from the quick-task request
     create_req = TaskCreateRequest(
         template_id=req.template_id,
         params=req.params,
@@ -150,9 +116,9 @@ async def client_quick_task(
     task = await _do_create(db, create_req, ctx, caps, request)
     task_id = task.task_id
 
-    # Poll loop
     poll_interval = 0.5
     elapsed = 0.0
+    max_wait = req.wait_seconds  # Use the request's value (already validated against limit)
     while elapsed < max_wait:
         await asyncio.sleep(poll_interval)
         elapsed += poll_interval
@@ -166,10 +132,8 @@ async def client_quick_task(
                 status=current.status,
                 result=(current.result or {}) if current.status == "success" else None,
             )
-        # Exponential back-off on polling interval
         poll_interval = min(poll_interval * 1.5, 2.0)
 
-    # Not done yet
     current = await get_task_any(db, task_id)
     status = current.status if current else "unknown"
     return QuickTaskResponse(
@@ -275,6 +239,50 @@ async def client_get_logs(
 # ── Internal helpers ─────────────────────────────────────────────
 
 
+def _merge_target_into_requirements(target: TargetSpec, base_reqs: dict | None = None) -> dict:
+    """Merge a ``TargetSpec`` into a requirements dict for scheduling.
+
+    ``target.tags``        → ``requirements.required_tags``
+    ``target.avoid_tags``  → ``requirements.avoid_tags``
+    ``target.mode/node_id`` → ``requirements.target``
+    ``target.requirements`` → deep-merged into the result
+    """
+    reqs = dict(base_reqs or {})
+
+    if target.tags:
+        existing = set(reqs.get("required_tags", []))
+        existing.update(target.tags)
+        reqs["required_tags"] = list(existing)
+
+    if target.avoid_tags:
+        existing = set(reqs.get("avoid_tags", []))
+        existing.update(target.avoid_tags)
+        reqs["avoid_tags"] = list(existing)
+
+    # Store the target spec for node-specific scheduling
+    reqs["target"] = {
+        "mode": target.mode,
+    }
+    if target.node_id:
+        reqs["target"]["node_id"] = target.node_id
+    if target.tags:
+        reqs["target"]["tags"] = target.tags
+    if target.avoid_tags:
+        reqs["target"]["avoid_tags"] = target.avoid_tags
+
+    # Merge user-supplied requirements from target
+    if target.requirements:
+        for k, v in target.requirements.items():
+            if k in ("required_tags", "avoid_tags", "runtime") and isinstance(v, list):
+                existing = set(reqs.get(k, []))
+                existing.update(v)
+                reqs[k] = list(existing)
+            else:
+                reqs[k] = v
+
+    return reqs
+
+
 async def _create_template_task(
     db: AsyncSession,
     req: TaskCreateRequest,
@@ -285,22 +293,16 @@ async def _create_template_task(
     """Handle template-based task creation with scope enforcement."""
     template_id = req.template_id or ""
 
-    # First check template exists at all
     from ..templates import get_template
     if not get_template(template_id):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unknown template: {template_id!r}",
-        )
+        raise HTTPException(status_code=400, detail=f"Unknown template: {template_id!r}")
 
-    # Scope: allowed_templates
+    # Scope: allowed_templates & mode=template
     validate_template_allowed(template_id, caps)
+    validate_mode_allowed("template", caps)
 
-    # Scope: priority / timeout
     validate_task_priority(req.priority, caps)
     validate_task_timeout(req.timeout_seconds, caps)
-
-    # Target validation
     _validate_target(req.target, ctx, caps)
 
     # Generate payload from template
@@ -309,19 +311,20 @@ async def _create_template_task(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    # Merge any user-supplied payload fields (target, etc.)
     final_payload = {**generated, **req.payload}
     final_payload["_template_id"] = template_id
     final_payload["_template_params"] = req.params
 
-    # Build the create request
+    # Merge target into requirements
+    merged_reqs = _merge_target_into_requirements(req.target, req.requirements)
+
     create_payload = TaskCreateRequest(
         type=f"template:{template_id}",
         target=req.target,
         priority=req.priority,
         timeout_seconds=req.timeout_seconds,
         max_retries=req.max_retries,
-        requirements={**req.requirements, **(req.target.requirements or {})},
+        requirements=merged_reqs,
         payload=final_payload,
     )
 
@@ -341,19 +344,21 @@ async def _create_template_task(
     return task
 
 
-async def _do_create(
+async def _create_direct_task(
     db: AsyncSession,
     req: TaskCreateRequest,
     ctx: ClientAuthContext,
     caps: dict,
     request: Request,
 ) -> Task:
-    """Core create logic shared by POST /tasks and POST /tasks/quick."""
-    if req.template_id:
-        return await _create_template_task(db, req, ctx, caps, request)
-
+    """Handle direct (non-template) task creation."""
     execution = req.payload.get("execution", {})
     mode = execution.get("mode", req.payload.get("mode", ""))
+
+    # Mode scope validation (skip for system tokens or empty mode)
+    if not ctx.is_system and mode:
+        validate_mode_allowed(mode, caps)
+
     if mode in ("shell", "hermes"):
         if not ctx.is_system:
             from ..auth import _check_role
@@ -366,6 +371,10 @@ async def _do_create(
     validate_task_priority(req.priority, caps)
     validate_task_timeout(req.timeout_seconds, caps)
     _validate_target(req.target, ctx, caps)
+
+    # Merge target into requirements
+    merged_reqs = _merge_target_into_requirements(req.target, req.requirements)
+    req.requirements = merged_reqs
 
     task = await create_task(
         db, req,
@@ -383,13 +392,23 @@ async def _do_create(
     return task
 
 
+async def _do_create(
+    db: AsyncSession,
+    req: TaskCreateRequest,
+    ctx: ClientAuthContext,
+    caps: dict,
+    request: Request,
+) -> Task:
+    """Core create logic shared by POST /tasks and POST /tasks/quick."""
+    if req.template_id:
+        return await _create_template_task(db, req, ctx, caps, request)
+    return await _create_direct_task(db, req, ctx, caps, request)
+
+
 def _validate_target(target: TargetSpec, ctx: ClientAuthContext, caps: dict):
     """Validate a target spec against token capabilities."""
-    # Tag-based targeting scope
     if target.tags:
         validate_target_tags(target.tags, caps)
-
-    # Specific node targeting
     if target.node_id:
         validate_can_target_node(ctx, caps)
 

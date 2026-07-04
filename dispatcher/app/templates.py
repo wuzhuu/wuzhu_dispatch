@@ -5,11 +5,9 @@ capabilities without directly submitting shell commands.  Each template
 defines a schema for its parameters, security constraints, and a
 generator that produces the ``execution`` payload.
 
-Adding a new template:
-  1. Define a ``_generate_<name>(params) -> dict`` function.
-  2. Register it in ``BUILTIN_TEMPLATES``.
-  3. The template ID becomes usable in ``POST /api/v1/client/tasks``
-     via the ``template_id`` + ``params`` fields.
+All shell commands embed user parameters via ``json.dumps()`` to prevent
+shell injection — even a URL containing quotes or special chars cannot
+break out of the ``python3 -c`` string.
 """
 
 from __future__ import annotations
@@ -19,6 +17,24 @@ import logging
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
+
+# ── Safe shell command builder ───────────────────────────────────
+
+
+def _py(code: str) -> str:
+    """Wrap *code* in ``python3 -c <json-encoded>``.
+
+    ``json.dumps`` handles all escaping (quotes, backslashes, newlines)
+    so user-supplied parameter values embedded in *code* via ``{var}``
+    are safe against shell injection.
+    """
+    return f"python3 -c {json.dumps(code)}"
+
+
+def _j(data: Any) -> str:
+    """Shortcut for ``json.dumps`` (used inside f-strings)."""
+    return json.dumps(data)
+
 
 # ── Parameter validation ──────────────────────────────────────────
 
@@ -41,10 +57,8 @@ def validate_params(schema: dict, params: dict) -> dict:
                 raise ValueError(f"Missing required parameter '{field_name}'")
             continue
 
-        # Type coercion / validation
         if field_type == "str":
             if not isinstance(value, str):
-                # Attempt str conversion
                 value = str(value)
             min_len = rules.get("min_length", 0)
             max_len = rules.get("max_length", 4096)
@@ -90,7 +104,6 @@ def validate_params(schema: dict, params: dict) -> dict:
                 value = bool(value)
 
         elif field_type == "url":
-            # URL validation
             from urllib.parse import urlparse
             if isinstance(value, str):
                 parsed = urlparse(value)
@@ -98,14 +111,12 @@ def validate_params(schema: dict, params: dict) -> dict:
                     raise ValueError(f"'{field_name}' must be http/https URL, got {parsed.scheme!r}")
                 if not parsed.netloc:
                     raise ValueError(f"'{field_name}' invalid URL")
-                # Deny internal / private IPs unless internal_network allowed
                 if not rules.get("allow_internal", False):
                     _deny_private_url(value)
             else:
                 raise ValueError(f"'{field_name}' must be a string URL")
 
         elif field_type == "domain":
-            # Domain validation
             if isinstance(value, str):
                 if not value.strip() or "." not in value:
                     raise ValueError(f"'{field_name}' is not a valid domain")
@@ -116,10 +127,8 @@ def validate_params(schema: dict, params: dict) -> dict:
                 raise ValueError(f"'{field_name}' must be a string")
 
         elif field_type == "host":
-            # Host (IP or domain) validation
             if isinstance(value, str):
                 import re as _re
-                # IP or domain
                 if not (_re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", value.strip())
                         or _re.match(r"^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", value.strip())
                         or _re.match(r"^[a-fA-F0-9:]+$", value.strip())):
@@ -139,18 +148,17 @@ def _deny_private_url(url: str):
     try:
         parsed = urlparse(url)
         host = parsed.hostname or ""
-        # Resolve if domain
         try:
             addr = socket.getaddrinfo(host, None)[0][4][0]
         except Exception:
-            return  # Can't resolve, let it through (runtime will fail)
+            return
         ip = ipaddress.ip_address(addr)
         if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast:
             raise ValueError(f"URL resolves to private/internal address: {addr}")
     except ValueError:
         raise
     except Exception:
-        pass  # Best effort
+        pass
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -159,130 +167,104 @@ def _deny_private_url(url: str):
 
 
 def _generate_http_probe(params: dict) -> dict:
-    """Generate shell command for HTTP probe."""
     url = params["url"]
     timeout = params.get("timeout", 10)
-    command = (
-        f"python3 -c \""
-        f"import urllib.request, time, json; "
-        f"start=time.time(); "
-        f"try: "
-        f"  r=urllib.request.urlopen('{url}', timeout={timeout}); "
-        f"  latency=int((time.time()-start)*1000); "
-        f"  body=r.read({params.get('max_bytes', 65536)}).decode('utf-8',errors='replace'); "
-        f"  print(json.dumps({{'status_code':r.status,'latency_ms':latency,"
-        f"'body_length':len(body),'headers':dict(r.headers.items())}}))"
-        f"except Exception as e: "
-        f"  print(json.dumps({{'error':str(e)}}))"
-        f"\""
+    max_bytes = params.get("max_bytes", 65536)
+    code = (
+        f"import urllib.request, time, json\n"
+        f"start = time.time()\n"
+        f"try:\n"
+        f"  r = urllib.request.urlopen({_j(url)}, timeout={timeout})\n"
+        f"  latency = int((time.time()-start)*1000)\n"
+        f"  body = r.read({max_bytes}).decode('utf-8', errors='replace')\n"
+        f"  print(json.dumps({{'status_code': r.status, 'latency_ms': latency, "
+        f"'body_length': len(body), 'headers': dict(r.headers.items())}}))\n"
+        f"except Exception as e:\n"
+        f"  print(json.dumps({{'error': str(e)}}))\n"
     )
-    return {
-        "execution": {"mode": "shell", "command": command},
-        "_template": "http_probe",
-    }
+    return {"execution": {"mode": "shell", "command": _py(code)}, "_template": "http_probe"}
 
 
 def _generate_dns_probe(params: dict) -> dict:
-    """Generate shell command for DNS probe."""
     domain = params["domain"]
     record_type = params.get("record_type", "A")
-    command = (
-        f"python3 -c \""
-        f"import socket, json, time; "
-        f"start=time.time(); "
-        f"try: "
-        f"  info=socket.getaddrinfo('{domain}', None); "
-        f"  ips=list(set(i[4][0] for i in info)); "
-        f"  latency=int((time.time()-start)*1000); "
-        f"  print(json.dumps({{'domain':'{domain}','record_type':'{record_type}',"
-        f"'ips':ips,'latency_ms':latency}}))"
-        f"except Exception as e: "
-        f"  print(json.dumps({{'error':str(e)}}))"
-        f"\""
+    code = (
+        f"import socket, json, time\n"
+        f"start = time.time()\n"
+        f"try:\n"
+        f"  info = socket.getaddrinfo({_j(domain)}, None)\n"
+        f"  ips = list(set(i[4][0] for i in info))\n"
+        f"  latency = int((time.time()-start)*1000)\n"
+        f"  print(json.dumps({{'domain': {_j(domain)}, 'record_type': {_j(record_type)}, "
+        f"'ips': ips, 'latency_ms': latency}}))\n"
+        f"except Exception as e:\n"
+        f"  print(json.dumps({{'error': str(e)}}))\n"
     )
-    return {
-        "execution": {"mode": "shell", "command": command},
-        "_template": "dns_probe",
-    }
+    return {"execution": {"mode": "shell", "command": _py(code)}, "_template": "dns_probe"}
 
 
 def _generate_ping_probe(params: dict) -> dict:
-    """Generate shell command for ping probe."""
     host = params["host"]
     count = params.get("count", 4)
-    command = (
-        f"python3 -c \""
-        f"import subprocess, json, re; "
-        f"try: "
-        f"  r=subprocess.run(['ping','-c','{count}','{host}'],"
-        f"capture_output=True,text=True,timeout=30); "
-        f"  output=r.stdout+r.stderr; "
-        f"  m=re.search(r'received, (\\\\d+)%', output); "
-        f"  loss=int(m.group(1)) if m else -1; "
-        f"  m2=re.search(r'min/avg/max/[\\\\w]+=(\\\\S+)', output); "
-        f"  rtt=m2.group(1) if m2 else ''; "
-        f"  print(json.dumps({{'host':'{host}','packet_loss_pct':loss,"
-        f"'rtt':rtt,'output':output[:2000]}}))"
-        f"except Exception as e: "
-        f"  print(json.dumps({{'error':str(e)}}))"
-        f"\""
+    code = (
+        f"import subprocess, json, re\n"
+        f"try:\n"
+        f"  r = subprocess.run(['ping', '-c', '{count}', {_j(host)}], "
+        f"capture_output=True, text=True, timeout=30)\n"
+        f"  output = r.stdout + r.stderr\n"
+        f"  m = re.search(r'received, (\\\\d+)%', output)\n"
+        f"  loss = int(m.group(1)) if m else -1\n"
+        f"  m2 = re.search(r'min/avg/max/[\\\\w]+=(\\\\S+)', output)\n"
+        f"  rtt = m2.group(1) if m2 else ''\n"
+        f"  print(json.dumps({{'host': {_j(host)}, 'packet_loss_pct': loss, "
+        f"'rtt': rtt, 'output': output[:2000]}}))\n"
+        f"except Exception as e:\n"
+        f"  print(json.dumps({{'error': str(e)}}))\n"
     )
-    return {
-        "execution": {"mode": "shell", "command": command},
-        "_template": "ping_probe",
-    }
+    return {"execution": {"mode": "shell", "command": _py(code)}, "_template": "ping_probe"}
 
 
 def _generate_small_fetch(params: dict) -> dict:
-    """Generate shell command for small file fetch."""
     url = params["url"]
     max_bytes = params.get("max_bytes", 1048576)
-    command = (
-        f"python3 -c \""
-        f"import urllib.request, json; "
-        f"try: "
-        f"  r=urllib.request.urlopen('{url}', timeout=30); "
-        f"  data=r.read({max_bytes}); "
-        f"  print(json.dumps({{'status_code':r.status,"
-        f"'content_length':len(data),"
-        f"'content_preview':data[:1024].decode('utf-8',errors='replace'),"
-        f"'headers':dict(r.headers.items())}}))"
-        f"except Exception as e: "
-        f"  print(json.dumps({{'error':str(e)}}))"
-        f"\""
+    code = (
+        f"import urllib.request, json\n"
+        f"try:\n"
+        f"  r = urllib.request.urlopen({_j(url)}, timeout=30)\n"
+        f"  data = r.read({max_bytes})\n"
+        f"  print(json.dumps({{'status_code': r.status, "
+        f"'content_length': len(data), "
+        f"'content_preview': data[:1024].decode('utf-8', errors='replace'), "
+        f"'headers': dict(r.headers.items())}}))\n"
+        f"except Exception as e:\n"
+        f"  print(json.dumps({{'error': str(e)}}))\n"
     )
-    return {
-        "execution": {"mode": "shell", "command": command},
-        "_template": "small_fetch",
-    }
+    return {"execution": {"mode": "shell", "command": _py(code)}, "_template": "small_fetch"}
 
 
 def _generate_stock_collect_light(params: dict) -> dict:
-    """Generate shell command for lightweight stock/API data collection."""
-    endpoint = params.get("endpoint", "overview")
     symbols = params.get("symbols", "000001,600000")
     source = params.get("source", "sina")
-    command = (
-        f"python3 -c \""
-        f"import urllib.request, json; "
-        f"sources={{\"sina\":\"https://hq.sinajs.cn/list={symbols}\","
-        f"\"eastmoney\":\"https://push2.eastmoney.com/api/qt/ulist.np/get\""
-        f"}}; "
-        f"url=sources.get('{source}', sources['sina']); "
-        f"try: "
-        f"  req=urllib.request.Request(url,headers={{'Referer':'https://finance.sina.com.cn'}}); "
-        f"  r=urllib.request.urlopen(req,timeout=30); "
-        f"  data=r.read(65536).decode('gbk',errors='replace'); "
-        f"  print(json.dumps({{'source':'{source}','endpoint':'{endpoint}',"
-        f"'data_length':len(data),'preview':data[:2000]}}))"
-        f"except Exception as e: "
-        f"  print(json.dumps({{'error':str(e)}}))"
-        f"\""
+    endpoint = params.get("endpoint", "overview")
+    code = (
+        f"import urllib.request, json\n"
+        f"sources = {{\n"
+        f"  'sina': 'https://hq.sinajs.cn/list=' + {_j(symbols)},\n"
+        f"  'eastmoney': 'https://push2.eastmoney.com/api/qt/ulist.np/get',\n"
+        f"}}\n"
+        f"url = sources.get({_j(source)}, sources['sina'])\n"
+        f"try:\n"
+        f"  req = urllib.request.Request(url, "
+        f"headers={{'Referer': 'https://finance.sina.com.cn'}})\n"
+        f"  r = urllib.request.urlopen(req, timeout=30)\n"
+        f"  data = r.read(65536).decode('gbk', errors='replace')\n"
+        f"  print(json.dumps({{'source': {_j(source)}, "
+        f"'endpoint': {_j(endpoint)}, "
+        f"'data_length': len(data), 'preview': data[:2000]}}))\n"
+        f"except Exception as e:\n"
+        f"  print(json.dumps({{'error': str(e)}}))\n"
     )
-    return {
-        "execution": {"mode": "shell", "command": command},
-        "_template": "stock_collect_light",
-    }
+    return {"execution": {"mode": "shell", "command": _py(code)}, "_template": "stock_collect_light"}
 
 
 # ═══════════════════════════════════════════════════════════════════

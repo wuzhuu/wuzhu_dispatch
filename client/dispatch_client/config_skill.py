@@ -138,28 +138,31 @@ def validate_node_yaml(path: str | Path) -> ConfigReport:
     if reg_token:
         report.add_warning("registration_token is present in config — should only be used for initial registration")
 
-    # work_dir writable
+    # work_dir writable check (READ-ONLY — never create dirs)
     work_dir = cfg.get("agent", {}).get("work_dir", "")
     if work_dir:
-        try:
-            test_path = Path(work_dir).expanduser().resolve()
-            if test_path.exists() and os.access(str(test_path), os.W_OK):
+        test_path = Path(work_dir).expanduser().resolve()
+        if test_path.exists():
+            if os.access(str(test_path), os.W_OK):
                 report.add_check("work_dir_writable", True, str(work_dir))
             else:
-                # Try to create it
-                test_path.mkdir(parents=True, exist_ok=True)
-                report.add_check("work_dir_writable", True, str(work_dir))
-        except (OSError, PermissionError):
-            report.add_check("work_dir_writable", False, f"Cannot write to {work_dir}")
+                report.add_check("work_dir_writable", False, f"Not writable: {work_dir}")
+        else:
+            report.add_check("work_dir_writable", False,
+                             f"Does not exist (create with --create-missing-dirs): {work_dir}")
 
-    # log_dir writable
+    # log_dir writable check (READ-ONLY)
     log_dir = cfg.get("agent", {}).get("log_dir", "")
     if log_dir:
-        try:
-            Path(log_dir).expanduser().resolve().mkdir(parents=True, exist_ok=True)
-            report.add_check("log_dir_writable", True)
-        except (OSError, PermissionError):
-            report.add_check("log_dir_writable", False)
+        test_path = Path(log_dir).expanduser().resolve()
+        if test_path.exists():
+            if os.access(str(test_path), os.W_OK):
+                report.add_check("log_dir_writable", True)
+            else:
+                report.add_check("log_dir_writable", False)
+        else:
+            report.add_check("log_dir_writable", False,
+                             f"Does not exist: {log_dir}")
 
     # cleanup config
     cleanup = cfg.get("cleanup", {})

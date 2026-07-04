@@ -248,8 +248,8 @@ def get_token_capabilities(scope: list | None) -> dict:
                 caps.update(item)
     return {
         "allowed_templates": caps.get("allowed_templates", []),
-        "allowed_modes": caps.get("allowed_modes", ["template"]),
-        "denied_modes": caps.get("denied_modes", ["shell", "hermes"]),
+        "allowed_modes": caps.get("allowed_modes", []),
+        "denied_modes": caps.get("denied_modes", []),
         "allowed_target_tags": caps.get("allowed_target_tags", []),
         "allowed_node_ids": caps.get("allowed_node_ids", []),
         "max_priority": caps.get("max_priority", 100),
@@ -309,6 +309,31 @@ def validate_task_priority(priority: int, caps: dict):
         raise HTTPException(
             status_code=403,
             detail=f"priority {priority} exceeds token limit {max_prio}",
+        )
+
+
+def validate_mode_allowed(mode: str, caps: dict):
+    """Validate *mode* against ``allowed_modes`` / ``denied_modes``.
+
+    - Template tasks use mode="template".
+    - Direct tasks use the execution mode (shell, hermes, etc.).
+    - If ``denied_modes`` contains the mode → 403.
+    - If ``allowed_modes`` is non-empty and does NOT contain the mode → 403.
+    - If both lists are empty → allow (legacy / full-access token / no capabilities set).
+    """
+    denied = caps.get("denied_modes", [])
+    if not denied and not caps.get("allowed_modes", []):
+        return  # No capability constraints — allow anything
+    if mode in denied:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Mode {mode!r} is denied by token's denied_modes",
+        )
+    allowed = caps.get("allowed_modes", [])
+    if allowed and mode not in allowed:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Mode {mode!r} is not in token's allowed_modes {allowed}",
         )
 
 

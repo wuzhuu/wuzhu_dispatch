@@ -501,7 +501,7 @@ dispatch-client task logs <task_id>
 | **配置文件权限** | `.env`、`node.yaml`、`client.yaml` 设为 `600` |
 | **agent_token** | Compute Server 的 node token，不是 client token，不要混用 |
 | **CSP** | `script-src 'self'` — 无 inline script；`style-src 'self'` — 无 unsafe-inline |
-| **client_api_token.scope** | ⚠️ MVP 预留字段，当前 token 权限继承所属用户 role，不依赖 scope 做权限隔离 |
+| **client_api_token.scope** | 已参与权限判断。支持 allowed_templates / allowed_modes / denied_modes / allowed_target_tags / max_priority / max_timeout_seconds / can_target_specific_node 等细粒度字段，详见 `docs/security.md` |
 
 ### 公开仓库注意事项
 

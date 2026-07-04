@@ -95,11 +95,13 @@ class DispatchRuntimeSkill:
     """Main skill for submitting and tracking tasks."""
 
     def __init__(self, dispatcher_url: str, client_token: str,
-                 default_wait: int = 10, max_wait: int = 30):
+                 default_wait: int = 10, max_wait: int = 30,
+                 _skill_config: SkillConfig | None = None):
         self.base_url = dispatcher_url.rstrip("/")
         self.client_token = client_token
         self.default_wait = default_wait
         self.max_wait = max_wait
+        self._skill_config = _skill_config
 
     @classmethod
     def from_config(cls, config: SkillConfig | None = None) -> "DispatchRuntimeSkill":
@@ -116,6 +118,7 @@ class DispatchRuntimeSkill:
             client_token=config.client_token,
             default_wait=config.default_wait_seconds,
             max_wait=config.max_wait_seconds,
+            _skill_config=config,
         )
 
     @classmethod
@@ -172,6 +175,11 @@ class DispatchRuntimeSkill:
         """
         params = params or {}
         target = target or {}
+
+        # Merge profile into target if SkillConfig is available
+        if profile and self._skill_config:
+            target = self._skill_config.merge_target_with_profile(target, profile)
+
         wait = min(wait_seconds or self.default_wait, self.max_wait)
 
         body = {
@@ -225,6 +233,10 @@ class DispatchRuntimeSkill:
         """
         params = params or {}
         target = target or {}
+
+        # Merge profile into target if SkillConfig is available
+        if profile and self._skill_config:
+            target = self._skill_config.merge_target_with_profile(target, profile)
 
         body = {
             "template_id": template_id,

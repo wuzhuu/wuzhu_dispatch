@@ -136,6 +136,44 @@ async def seed_db():
             }],
             enabled=True,
         ))
+        # operator token: limited to node-hk only
+        db.add(ClientApiToken(
+            token_id="tok-oper-node-hk-only",
+            token_hash=sha256_hash("token-oper-node-hk-only"),
+            user_id="oper-v83",
+            scope=[{
+                "allowed_templates": ["http_probe"],
+                "allowed_modes": ["template"],
+                "denied_modes": ["shell", "hermes"],
+                "allowed_target_tags": ["hk", "us", "foreign_reachable"],
+                "can_target_specific_node": True,
+                "allowed_node_ids": ["node-hk"],
+                "max_priority": 50,
+                "max_timeout_seconds": 300,
+                "max_concurrent_tasks": 10,
+                "max_payload_bytes": 65536,
+            }],
+            enabled=True,
+        ))
+        # operator token: concurrency=1
+        db.add(ClientApiToken(
+            token_id="tok-oper-concurrency-one",
+            token_hash=sha256_hash("token-oper-concurrency-one"),
+            user_id="oper-v83",
+            scope=[{
+                "allowed_templates": ["http_probe"],
+                "allowed_modes": ["template"],
+                "denied_modes": ["shell", "hermes"],
+                "allowed_target_tags": ["hk", "foreign_reachable"],
+                "max_priority": 50,
+                "max_timeout_seconds": 300,
+                "max_concurrent_tasks": 1,
+                "max_payload_bytes": 65536,
+                "can_target_specific_node": False,
+            }],
+            enabled=True,
+        ))
+        
         # viewer token: very restricted
         db.add(ClientApiToken(
             token_id="tok-viewer-restricted",
@@ -526,6 +564,53 @@ async def run_tests():
             rt = reqs.get("runtime", {})
             check("26. deep merge runtime has shell", rt.get("shell") is True)
             check("26b. deep merge runtime has python", rt.get("python") is True)
+
+        # ═══════════════════════════════════════════════════════════════════
+        # 29. allowed_node_ids: can target node-hk, cannot target node-us
+        # ═══════════════════════════════════════════════════════════════════
+        node_h_only = {"Authorization": "Bearer token-oper-node-hk-only"}
+        r = await cli.post("/api/v1/client/tasks",
+                           json={
+                               "template_id": "http_probe",
+                               "params": {"url": "https://example.com"},
+                               "target": {"mode": "node", "node_id": "node-hk"},
+                               "timeout_seconds": 30,
+                           },
+                           headers=node_h_only)
+        check("29. allowed_node_ids allows node-hk", r.status_code in (200, 201))
+        r = await cli.post("/api/v1/client/tasks",
+                           json={
+                               "template_id": "http_probe",
+                               "params": {"url": "https://example.com"},
+                               "target": {"mode": "node", "node_id": "node-us"},
+                               "timeout_seconds": 30,
+                           },
+                           headers=node_h_only)
+        check("29b. allowed_node_ids blocks node-us → 403", r.status_code == 403)
+
+        # ═══════════════════════════════════════════════════════════════════
+        # 30. max_concurrent_tasks: second task blocked → 429
+        # ═══════════════════════════════════════════════════════════════════
+        conc_one = {"Authorization": "Bearer token-oper-concurrency-one"}
+        r1 = await cli.post("/api/v1/client/tasks",
+                            json={
+                                "template_id": "http_probe",
+                                "params": {"url": "https://example.com"},
+                                "target": {"tags": ["hk"]},
+                                "timeout_seconds": 30,
+                            },
+                            headers=conc_one)
+        check("30. max_concurrent_tasks first ok", r1.status_code in (200, 201))
+        r2 = await cli.post("/api/v1/client/tasks",
+                            json={
+                                "template_id": "http_probe",
+                                "params": {"url": "https://example.com"},
+                                "target": {"tags": ["hk"]},
+                                "timeout_seconds": 30,
+                            },
+                            headers=conc_one)
+        check("30b. max_concurrent_tasks second → 429", r2.status_code == 429)
+
 
     # Cleanup
     await engine.dispose()

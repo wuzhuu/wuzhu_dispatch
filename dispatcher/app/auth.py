@@ -337,6 +337,59 @@ def validate_mode_allowed(mode: str, caps: dict):
         )
 
 
+def validate_allowed_node_id(node_id: str, caps: dict):
+    """Raise ``HTTPException(403)`` if *node_id* not in allowed_node_ids."""
+    allowed = caps.get("allowed_node_ids", [])
+    if allowed and node_id not in allowed:
+        raise HTTPException(
+            status_code=403,
+            detail=f"node_id {node_id!r} not in token's allowed_node_ids {allowed}",
+        )
+
+
+def validate_payload_size(payload: dict, caps: dict):
+    """Raise ``HTTPException(413)`` if JSON payload exceeds max_payload_bytes."""
+    import json
+    max_bytes = caps.get("max_payload_bytes", 65536)
+    if not max_bytes:
+        return
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
+    if len(raw) > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Task payload {len(raw)} bytes exceeds token limit {max_bytes}",
+        )
+
+
+async def validate_concurrent_tasks(db: AsyncSession, ctx: ClientAuthContext, caps: dict):
+    """Raise ``HTTPException(429)`` if token/user has too many active tasks."""
+    from sqlalchemy import select, func
+    from .models import Task
+    limit = caps.get("max_concurrent_tasks", 10)
+    if not limit or ctx.is_system:
+        return
+    active_statuses = ["pending", "running", "retrying"]
+    if ctx.token_id:
+        stmt = select(func.count(Task.id)).where(
+            Task.created_by_client_token_id == ctx.token_id,
+            Task.status.in_(active_statuses),
+        )
+    elif ctx.user_id:
+        stmt = select(func.count(Task.id)).where(
+            Task.created_by_user_id == ctx.user_id,
+            Task.status.in_(active_statuses),
+        )
+    else:
+        return
+    result = await db.execute(stmt)
+    count = result.scalar() or 0
+    if count >= limit:
+        raise HTTPException(
+            status_code=429,
+            detail=f"max_concurrent_tasks {limit} exceeded (current: {count})",
+        )
+
+
 # ═══════════════════════════════════════════════════════════════════
 # COMPUTE identity: node_id + agent_token
 # ═══════════════════════════════════════════════════════════════════

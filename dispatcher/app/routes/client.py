@@ -15,12 +15,15 @@ from ..auth import (
     authenticate_client,
     get_token_capabilities,
     require_client_role,
+    validate_allowed_node_id,
     validate_can_target_node,
     validate_target_tags,
     validate_task_priority,
     validate_task_timeout,
     validate_template_allowed,
     validate_mode_allowed,
+    validate_payload_size,
+    validate_concurrent_tasks,
 )
 from ..database import get_db
 from ..models import Task
@@ -270,13 +273,21 @@ def _merge_target_into_requirements(target: TargetSpec, base_reqs: dict | None =
     if target.avoid_tags:
         reqs["target"]["avoid_tags"] = target.avoid_tags
 
-    # Merge user-supplied requirements from target
+    # Merge user-supplied requirements from target (deep merge dict fields)
     if target.requirements:
         for k, v in target.requirements.items():
-            if k in ("required_tags", "avoid_tags", "runtime") and isinstance(v, list):
+            if k in ("required_tags", "avoid_tags") and isinstance(v, list):
                 existing = set(reqs.get(k, []))
                 existing.update(v)
                 reqs[k] = list(existing)
+            elif k == "runtime" and isinstance(v, dict):
+                base = dict(reqs.get("runtime", {}))
+                base.update(v)
+                reqs["runtime"] = base
+            elif isinstance(v, dict) and isinstance(reqs.get(k), dict):
+                base = dict(reqs.get(k, {}))
+                base.update(v)
+                reqs[k] = base
             else:
                 reqs[k] = v
 
@@ -305,15 +316,19 @@ async def _create_template_task(
     validate_task_timeout(req.timeout_seconds, caps)
     _validate_target(req.target, ctx, caps)
 
-    # Generate payload from template
+    # Generate payload from template (with caps for allow_internal_network)
     try:
-        generated = generate_task_payload(template_id, req.params)
+        generated = generate_task_payload(template_id, req.params, caps=caps)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
     final_payload = {**generated, **req.payload}
     final_payload["_template_id"] = template_id
     final_payload["_template_params"] = req.params
+
+    # Payload size + concurrent limits
+    validate_payload_size(final_payload, caps)
+    await validate_concurrent_tasks(db, ctx, caps)
 
     # Merge target into requirements
     merged_reqs = _merge_target_into_requirements(req.target, req.requirements)
@@ -372,6 +387,10 @@ async def _create_direct_task(
     validate_task_timeout(req.timeout_seconds, caps)
     _validate_target(req.target, ctx, caps)
 
+    # Payload size + concurrent limits
+    validate_payload_size(req.payload or {}, caps)
+    await validate_concurrent_tasks(db, ctx, caps)
+
     # Merge target into requirements
     merged_reqs = _merge_target_into_requirements(req.target, req.requirements)
     req.requirements = merged_reqs
@@ -411,6 +430,7 @@ def _validate_target(target: TargetSpec, ctx: ClientAuthContext, caps: dict):
         validate_target_tags(target.tags, caps)
     if target.node_id:
         validate_can_target_node(ctx, caps)
+        validate_allowed_node_id(target.node_id, caps)
 
 
 def _check_task_ownership(ctx: ClientAuthContext, task: Task):

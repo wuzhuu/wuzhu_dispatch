@@ -39,7 +39,7 @@ def _j(data: Any) -> str:
 # ── Parameter validation ──────────────────────────────────────────
 
 
-def validate_params(schema: dict, params: dict) -> dict:
+def validate_params(schema: dict, params: dict, caps: dict | None = None) -> dict:
     """Validate *params* against a template *schema*.
 
     Returns cleaned params with defaults filled in.
@@ -58,6 +58,7 @@ def validate_params(schema: dict, params: dict) -> dict:
             continue
 
         if field_type == "str":
+            # ... existing str validation ...
             if not isinstance(value, str):
                 value = str(value)
             min_len = rules.get("min_length", 0)
@@ -102,8 +103,8 @@ def validate_params(schema: dict, params: dict) -> dict:
                 value = value.lower() in ("true", "1", "yes")
             else:
                 value = bool(value)
-
         elif field_type == "url":
+            # URL validation
             from urllib.parse import urlparse
             if isinstance(value, str):
                 parsed = urlparse(value)
@@ -111,7 +112,11 @@ def validate_params(schema: dict, params: dict) -> dict:
                     raise ValueError(f"'{field_name}' must be http/https URL, got {parsed.scheme!r}")
                 if not parsed.netloc:
                     raise ValueError(f"'{field_name}' invalid URL")
-                if not rules.get("allow_internal", False):
+                # allow_internal: template rules first, then caps override
+                allow_internal = rules.get("allow_internal", False)
+                if not allow_internal and caps and caps.get("allow_internal_network", False):
+                    allow_internal = True
+                if not allow_internal:
                     _deny_private_url(value)
             else:
                 raise ValueError(f"'{field_name}' must be a string URL")
@@ -342,7 +347,7 @@ def get_template(template_id: str) -> TemplateEntry | None:
     return BUILTIN_TEMPLATES.get(template_id)
 
 
-def generate_task_payload(template_id: str, params: dict) -> dict:
+def generate_task_payload(template_id: str, params: dict, caps: dict | None = None) -> dict:
     """Validate params against a template and generate the execution payload.
 
     Returns the full task payload (including execution).  Raises
@@ -353,7 +358,7 @@ def generate_task_payload(template_id: str, params: dict) -> dict:
         raise ValueError(f"Unknown template: {template_id!r}")
 
     schema = template.get("schema", {})
-    validated = validate_params(schema, params)
+    validated = validate_params(schema, params, caps=caps)
     generator: Callable = template["generate"]
     execution_payload = generator(validated)
     execution_payload["_template"] = template_id

@@ -273,7 +273,7 @@ async def run_tests():
         check("7c. Quick task has task_id", "task_id" in qr)
 
         # ═══════════════════════════════════════════════════════════════
-        # 8. Quick task wait_seconds exceeds token limit → clamped (no error)
+        # 8. Quick task wait_seconds exceeds token limit → 403 (strict)
         # ═══════════════════════════════════════════════════════════════
         r = await cli.post("/api/v1/client/tasks/quick",
                            json={
@@ -282,8 +282,7 @@ async def run_tests():
                                "wait_seconds": 999,  # exceeds max_timeout_seconds=60
                            },
                            headers=viewer_h)
-        check("8. Quick task with high wait (clamped) still works",
-              r.status_code in (200, 201, 403))
+        check("8. Quick task high wait → 403", r.status_code == 403)
 
         # ═══════════════════════════════════════════════════════════════
         # 9. Client token max_timeout_seconds exceeded → 403
@@ -408,6 +407,79 @@ async def run_tests():
                            headers=oper_h)
         check("19. Restricted oper template within scope → 2xx",
               r.status_code in (200, 201))
+        # ═══════════════════════════════════════════════════════════════════
+        # 20. target.tags persists to requirements.required_tags
+        # ═══════════════════════════════════════════════════════════════════
+        r = await cli.post("/api/v1/client/tasks",
+                           json={
+                               "template_id": "http_probe",
+                               "params": {"url": "https://example.com"},
+                               "target": {"tags": ["hk", "cn_reachable"]},
+                           },
+                           headers=oper_h)
+        if r.status_code in (200, 201):
+            td = r.json()
+            reqs = td.get("requirements", {})
+            check("20. target.tags persisted to required_tags",
+                  "hk" in reqs.get("required_tags", []) and
+                  "cn_reachable" in reqs.get("required_tags", []))
+
+        # ═══════════════════════════════════════════════════════════════════
+        # 21. target.avoid_tags persists to requirements
+        # ═══════════════════════════════════════════════════════════════════
+        r = await cli.post("/api/v1/client/tasks",
+                           json={
+                               "template_id": "http_probe",
+                               "params": {"url": "https://example.com"},
+                               "target": {"avoid_tags": ["low_memory"]},
+                           },
+                           headers=oper_h)
+        if r.status_code in (200, 201):
+            td = r.json()
+            reqs = td.get("requirements", {})
+            check("21. target.avoid_tags persisted",
+                  "low_memory" in reqs.get("avoid_tags", []))
+
+        # ═══════════════════════════════════════════════════════════════════
+        # 22. target.mode=node persists to requirements.target.node_id
+        # ═══════════════════════════════════════════════════════════════════
+        r = await cli.post("/api/v1/client/tasks",
+                           json={
+                               "template_id": "http_probe",
+                               "params": {"url": "https://example.com"},
+                               "target": {"mode": "node", "node_id": "node-hk"},
+                           },
+                           headers=owner_h)
+        if r.status_code in (200, 201):
+            td = r.json()
+            reqs = td.get("requirements", {})
+            tgt = reqs.get("target", {})
+            check("22. target.mode persisted", tgt.get("mode") == "node")
+            check("22b. target.node_id persisted", tgt.get("node_id") == "node-hk")
+
+        # ═══════════════════════════════════════════════════════════════════
+        # 23. required_tags affects scheduling (node without tag cannot pull)
+        # ═══════════════════════════════════════════════════════════════════
+        r = await cli.post("/api/v1/client/tasks",
+                           json={
+                               "template_id": "http_probe",
+                               "params": {"url": "https://example.com"},
+                               "target": {"tags": ["hk"]},
+                               "priority": 80,
+                           },
+                           headers=owner_h)
+        check("23. HK-tagged task created", r.status_code in (200, 201))
+        if r.status_code in (200, 201):
+            hk_tid = r.json()["task_id"]
+            r2 = await cli.post("/api/v1/compute/tasks/pull",
+                                json={},
+                                headers={"Authorization": "Bearer token-us",
+                                         "X-Node-Id": "node-us"})
+            if r2.status_code == 200:
+                pulled = r2.json()
+                check("23a. node-us cannot pull hk-tagged task",
+                      pulled is None or pulled.get("task_id") != hk_tid)
+
 
     # Cleanup
     await engine.dispose()

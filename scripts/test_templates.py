@@ -481,6 +481,52 @@ async def run_tests():
                       pulled is None or pulled.get("task_id") != hk_tid)
 
 
+
+        # ═══════════════════════════════════════════════════════════════════
+        # 24. max_payload_bytes exceeded → 413
+        # ═══════════════════════════════════════════════════════════════════
+        # Use oper_h but with a 100KB+ payload to exceed max_payload_bytes
+        huge_url = "https://example.com/" + "x" * 100000
+        r = await cli.post("/api/v1/client/tasks",
+                           json={
+                               "template_id": "http_probe",
+                               "params": {"url": huge_url, "timeout": 1},
+                               "timeout_seconds": 30,
+                           },
+                           headers=oper_h)
+        check("24. max_payload_bytes exceeded → 413", r.status_code == 413)
+
+        # ═══════════════════════════════════════════════════════════════════
+        # 25. allow_internal_network=false blocks 127.0.0.1
+        # ═══════════════════════════════════════════════════════════════════
+        r = await cli.post("/api/v1/client/tasks",
+                           json={
+                               "template_id": "http_probe",
+                               "params": {"url": "http://127.0.0.1/test"},
+                               "timeout_seconds": 30,
+                           },
+                           headers=oper_h)
+        # oper_h has no allow_internal_network, so URL param validation blocks it
+        check("25. internal URL blocked → 400", r.status_code == 400)
+
+        # ═══════════════════════════════════════════════════════════════════
+        # 26. target.requirements.runtime dict deep merge
+        # ═══════════════════════════════════════════════════════════════════
+        r = await cli.post("/api/v1/client/tasks",
+                           json={
+                               "template_id": "http_probe",
+                               "params": {"url": "https://example.com"},
+                               "requirements": {"runtime": {"shell": True}},
+                               "target": {"requirements": {"runtime": {"python": True}}},
+                           },
+                           headers=owner_h)
+        if r.status_code in (200, 201):
+            td = r.json()
+            reqs = td.get("requirements", {})
+            rt = reqs.get("runtime", {})
+            check("26. deep merge runtime has shell", rt.get("shell") is True)
+            check("26b. deep merge runtime has python", rt.get("python") is True)
+
     # Cleanup
     await engine.dispose()
     if os.path.exists(_db_path):

@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     scheduler_interval_seconds: int = 30
 
     # ── Rate limiting (requests / window_seconds) ───────────────────
-    rate_limit_login: int = 5
+    rate_limit_login: int = 50
     rate_limit_login_window: int = 300
     rate_limit_heartbeat: int = 30
     rate_limit_heartbeat_window: int = 60

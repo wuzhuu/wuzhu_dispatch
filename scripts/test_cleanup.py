@@ -404,6 +404,134 @@ def main():
         check("cleanup_after overrides keep_success_seconds", removed >= 1)
 
     # ═══════════════════════════════════════════════════════════
+    # 22. Size eviction does NOT delete ALL eligible dirs
+    #     (Bug fix: _dir_size_bytes must be computed BEFORE deletion)
+    # ═══════════════════════════════════════════════════════════
+    with tempfile.TemporaryDirectory() as td:
+        # Create 5 success dirs, each ~100KB, all within retention
+        tdirs = []
+        for i in range(5):
+            tdir = Path(task_root_dir(td, f"big-{i}"))
+            (tdir / WORK_DIR_SUB).mkdir(parents=True, exist_ok=True)
+            write_task_meta(td, f"big-{i}", status="success")
+            (tdir / WORK_DIR_SUB / "data.bin").write_bytes(b"x" * 100_000)
+            old = time.time() - 2000 + i * 10
+            os.utime(str(tdir), (old, old))
+            tdirs.append(tdir)
+
+        cfg = CleanupConfig({
+            "cleanup_success": True,
+            "keep_success_seconds": 86400,  # all within retention
+            "max_work_dir_size_mb": 0.3,    # ~300KB — should keep ~2-3 dirs
+            "delete_empty_dirs": False,
+        })
+        removed, remaining, dp = cleanup_expired_task_dirs(td, cfg)
+
+        check("Size eviction: removed some but NOT all dirs",
+              0 < removed < 5)
+        check("Size eviction: remaining dirs still exist",
+              remaining > 0 and remaining == 5 - removed)
+
+    # ═══════════════════════════════════════════════════════════
+    # 23. Size eviction priority: success deleted before failed
+    # ═══════════════════════════════════════════════════════════
+    with tempfile.TemporaryDirectory() as td:
+        # One success dir (100KB), one failed dir (100KB)
+        tdir_s = Path(task_root_dir(td, "succ-task"))
+        (tdir_s / WORK_DIR_SUB).mkdir(parents=True, exist_ok=True)
+        write_task_meta(td, "succ-task", status="success")
+        (tdir_s / WORK_DIR_SUB / "data.bin").write_bytes(b"x" * 100_000)
+
+        tdir_f = Path(task_root_dir(td, "fail-task"))
+        (tdir_f / WORK_DIR_SUB).mkdir(parents=True, exist_ok=True)
+        write_task_meta(td, "fail-task", status="failed")
+        (tdir_f / WORK_DIR_SUB / "data.bin").write_bytes(b"x" * 100_000)
+
+        old = time.time() - 2000
+        os.utime(str(tdir_s), (old, old))
+        os.utime(str(tdir_f), (old, old))
+
+        # Only allow 150KB total — 200KB total, need to drop one
+        cfg = CleanupConfig({
+            "cleanup_success": True,
+            "cleanup_failed": False,  # don't cleanup failed
+            "keep_success_seconds": 86400,
+            "max_work_dir_size_mb": 0.15,  # 150KB
+            "delete_empty_dirs": False,
+        })
+        removed, remaining, dp = cleanup_expired_task_dirs(td, cfg)
+        # Success dir should be removed first; failed kept
+        check("Size eviction: success dir removed before failed when cleanup_failed=False",
+              removed >= 1)
+        check("Size eviction: failed dir still exists (cleanup_failed=False)",
+              (Path(task_root_dir(td, "fail-task")) / WORK_DIR_SUB / "data.bin").exists())
+
+    # ═══════════════════════════════════════════════════════════
+    # 24. ShellExecutor refuses invalid task_id
+    # ═══════════════════════════════════════════════════════════
+    with tempfile.TemporaryDirectory() as td:
+        from dispatch_compute_server.executors.shell_executor import ShellExecutor
+        executor = ShellExecutor()
+
+        # ../evil
+        task = {
+            "task_id": "../evil",
+            "timeout_seconds": 30,
+            "payload": {"execution": {"mode": "shell", "command": "echo hacked"}},
+        }
+        result = asyncio_run(executor.run(task, task["payload"]["execution"], td, td))
+        check("ShellExecutor: ../evil task_id rejected", not result.get("success"))
+        check("ShellExecutor: ../evil error message mentions invalid or rejected",
+              "invalid" in result.get("error", "").lower() or
+              "rejected" in result.get("error", "").lower())
+
+        # Verify no directory was created outside tasks/
+        check("ShellExecutor: ../evil didn't create dir outside tasks/",
+              not (Path(td) / ".." / "evil").exists())
+
+        # task_id with slash
+        task2 = {
+            "task_id": "a/b",
+            "timeout_seconds": 30,
+            "payload": {"execution": {"mode": "shell", "command": "echo test"}},
+        }
+        result2 = asyncio_run(executor.run(task2, task2["payload"]["execution"], td, td))
+        check("ShellExecutor: a/b task_id rejected", not result2.get("success"))
+
+    # ═══════════════════════════════════════════════════════════
+    # 25. Size eviction: only expired success dirs deleted when
+    #     cleanup_failed/cleanup_timeout are false
+    # ═══════════════════════════════════════════════════════════
+    with tempfile.TemporaryDirectory() as td:
+        # Two dirs: expired success (2h old, keep=1h), old failed (2h old)
+        tdir_s = Path(task_root_dir(td, "old-succ"))
+        (tdir_s / WORK_DIR_SUB).mkdir(parents=True, exist_ok=True)
+        write_task_meta(td, "old-succ", status="success")
+        (tdir_s / WORK_DIR_SUB / "data.bin").write_bytes(b"x" * 100_000)
+        old = time.time() - 7200
+        os.utime(str(tdir_s), (old, old))
+
+        tdir_f = Path(task_root_dir(td, "old-fail"))
+        (tdir_f / WORK_DIR_SUB).mkdir(parents=True, exist_ok=True)
+        write_task_meta(td, "old-fail", status="failed")
+        (tdir_f / WORK_DIR_SUB / "data.bin").write_bytes(b"x" * 100_000)
+        os.utime(str(tdir_f), (old, old))
+
+        # Strict limit to trigger size eviction
+        cfg = CleanupConfig({
+            "cleanup_success": True,
+            "cleanup_failed": False,  # failed NOT eligible
+            "keep_success_seconds": 3600,
+            "max_work_dir_size_mb": 0.05,  # 50KB — both dirs are 100KB each
+            "delete_empty_dirs": False,
+        })
+        removed, remaining, dp = cleanup_expired_task_dirs(td, cfg)
+        check("Size priority: expired success removed (beyond retention)",
+              not (Path(task_root_dir(td, "old-succ")) / WORK_DIR_SUB / "data.bin").exists())
+        check("Size priority: failed kept (cleanup_failed=False)",
+              (Path(task_root_dir(td, "old-fail")) / WORK_DIR_SUB / "data.bin").exists())
+
+    # ═══════════════════════════════════════════════════════════
     # Summary
     # ═══════════════════════════════════════════════════════════
     print(f"\n{'=' * 60}")

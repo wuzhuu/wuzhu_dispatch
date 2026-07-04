@@ -527,7 +527,13 @@ def _size_based_eviction(
     running_task_ids: set[str],
     task_outcomes: dict[str, dict],
 ) -> dict:
-    """Delete oldest directories when work_dir exceeds max size.
+    """Delete directories when work_dir exceeds max size.
+
+    Priority order (highest first):
+    1. Expired success/cancelled dirs (beyond their retention)
+    2. Old success dirs (within retention, but oldest first)
+    3. Expired failed/timeout dirs, if those cleanup flags are on
+    4. Never delete running task dirs
 
     Returns ``{"evicted": int}``.
     """
@@ -535,37 +541,88 @@ def _size_based_eviction(
     if cleanup_cfg.max_work_dir_size_mb <= 0:
         return {"evicted": 0}
 
-    current_size = get_work_dir_size(work_dir)
+    current_bytes = get_work_dir_size(work_dir) * 1024 * 1024
     max_bytes = cleanup_cfg.max_work_dir_size_mb * 1024 * 1024
 
-    if current_size * 1024 * 1024 <= max_bytes:
+    if current_bytes <= max_bytes:
         return {"evicted": 0}
 
-    # Gather eligible dirs, sorted oldest first
+    # Gather eligible dirs
     candidates = _scan_task_dirs(work_dir, allowed_workspaces, running_task_ids)
-    candidates.sort(key=lambda e: e["mtime"])
+
+    # Score each candidate for eviction priority (lower = deleted first)
+    def _priority(entry: dict) -> tuple:
+        """Return a sort key: (score, mtime).
+
+        Score 0 = expired success/cancelled (delete first)
+        Score 1 = old success (within retention)
+        Score 2 = expired failed/timeout (if enabled)
+        Score 3 = anything else (delete last)
+        """
+        meta = entry.get("meta")
+        status = meta.get("status") if meta else None
+        outcome = task_outcomes.get(entry["name"], {})
+        ostatus = outcome.get("status")
+        effective_status = status or ostatus or "unknown"
+
+        age = entry["age_seconds"]
+
+        if effective_status == "success" and cleanup_cfg.cleanup_success:
+            if age >= cleanup_cfg.keep_success_seconds:
+                return (0, entry["mtime"])  # expired success
+            return (1, entry["mtime"])  # old success (within retention)
+        if effective_status == "cancelled" and cleanup_cfg.cleanup_cancelled:
+            if age >= cleanup_cfg.keep_cancelled_seconds:
+                return (0, entry["mtime"])
+            return (1, entry["mtime"])
+        if effective_status == "failed" and cleanup_cfg.cleanup_failed:
+            if age >= cleanup_cfg.keep_failed_seconds:
+                return (2, entry["mtime"])  # expired failed
+            return (3, entry["mtime"])  # keep
+        if effective_status == "timeout" and cleanup_cfg.cleanup_timeout:
+            if age >= cleanup_cfg.keep_timeout_seconds:
+                return (2, entry["mtime"])
+            return (3, entry["mtime"])
+
+        return (3, entry["mtime"])
+
+    candidates.sort(key=_priority)
 
     for entry in candidates:
-        if current_size * 1024 * 1024 <= max_bytes:
+        if current_bytes <= max_bytes:
             break
         if entry["age_seconds"] < 60:
             continue  # don't delete very recent dirs
         if entry["name"] in running_task_ids:
             continue  # never delete running
 
-        # Only delete if it's eligible (prefer success/cancelled)
+        # Only delete statuses whose cleanup flag is enabled.
+        # This ensures that when cleanup_failed=False, failed dirs are
+        # NOT deleted even under disk pressure.
         meta = entry.get("meta")
         status = meta.get("status") if meta else None
         outcome = task_outcomes.get(entry["name"], {})
         ostatus = outcome.get("status")
+        effective_status = status or ostatus
 
-        effective_status = status or ostatus or "unknown"
-        if effective_status in ("unknown", "running"):
-            continue  # skip unknown/running for size eviction
+        if effective_status == "success" and not cleanup_cfg.cleanup_success:
+            continue
+        if effective_status == "failed" and not cleanup_cfg.cleanup_failed:
+            continue
+        if effective_status == "timeout" and not cleanup_cfg.cleanup_timeout:
+            continue
+        if effective_status == "cancelled" and not cleanup_cfg.cleanup_cancelled:
+            continue
+        if effective_status is None or effective_status == "unknown":
+            continue  # skip unknown for size eviction
 
+        # Compute size BEFORE deletion, then delete
+        dir_bytes = _dir_size_bytes(entry["path"])
         if cleanup_task_dir(work_dir, entry["name"], reason="size-evict"):
             evicted += 1
-            current_size -= _dir_size_mb(entry["path"])
+            current_bytes -= dir_bytes
+            if current_bytes < 0:
+                current_bytes = 0
 
     return {"evicted": evicted}
 
@@ -590,6 +647,11 @@ def _remove_empty_task_dirs(work_dir: str):
 
 def _dir_size_mb(path: Path) -> float:
     """Calculate the size of a directory in MB (approximate)."""
+    return _dir_size_bytes(path) / (1024 * 1024)
+
+
+def _dir_size_bytes(path: Path) -> int:
+    """Calculate the size of a directory in bytes (approximate)."""
     total = 0
     try:
         for f in path.rglob("*"):
@@ -597,7 +659,7 @@ def _dir_size_mb(path: Path) -> float:
                 total += f.stat().st_size
     except OSError:
         pass
-    return total / (1024 * 1024)
+    return total
 
 
 def get_work_dir_size(work_dir: str) -> float:

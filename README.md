@@ -538,7 +538,7 @@ dispatch-client task logs <task_id>
 pip install -r dispatcher/requirements.txt
 python3 -m compileall -q dispatcher compute-server client common scripts
 python3 scripts/test_pipeline.py          # 48 项单元测试
-python3 scripts/test_cleanup.py           # 56 项清理模块测试
+python3 scripts/test_cleanup.py           # 66 项清理模块测试
 python3 scripts/test_route_integration.py  # 50 项路由集成测试
 ```
 

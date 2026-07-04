@@ -31,6 +31,7 @@ from typing import Any
 
 from ..cleanup import (
     is_valid_task_dir_name,
+    is_safe_child_path,
     task_root_dir,
     task_work_dir,
     task_tmp_dir,
@@ -107,6 +108,15 @@ class ShellExecutor:
 
         mode = task.get("payload", {}).get("execution", {}).get("mode", "shell")
         timeout = task.get("timeout_seconds", 3600)
+
+        # ── Path safety check before creating directories ──────────────
+        from ..cleanup import TASKS_DIR
+        tasks_base = os.path.join(work_dir, TASKS_DIR)
+        if not is_safe_child_path(tasks_base, task_root_dir(work_dir, task_id)):
+            return {
+                "success": False,
+                "error": f"Task dir {task_id!r} is outside allowed base {tasks_base}",
+            }
 
         # ── Create task directory tree ────────────────────────────────
         task_root = task_root_dir(work_dir, task_id)

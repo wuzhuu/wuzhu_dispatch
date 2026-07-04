@@ -20,6 +20,14 @@ logs/
 .env
 .env.local
 
+# Identity / secrets — do NOT commit real config files
+*.pem
+*.key
+id_rsa
+id_ed25519
+/node.yaml
+/client.yaml
+
 # IDE
 .vscode/
 .idea/

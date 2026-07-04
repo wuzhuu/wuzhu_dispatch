@@ -28,7 +28,7 @@ SECURITY_HEADERS = {
         "frame-ancestors 'none'; "
         "connect-src 'self'; "
         "img-src 'self' data:; "
-        "style-src 'self' 'unsafe-inline'; "
+        "style-src 'self'; "
         "form-action 'self'"
     ),
     "X-Frame-Options": "DENY",

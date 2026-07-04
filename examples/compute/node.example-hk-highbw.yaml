@@ -1,13 +1,13 @@
-# Compute Server configuration: Hong Kong high-bandwidth node
+# Compute Server configuration: High-bandwidth node (HK region)
 # Path: /etc/wuzhu-dispatch/node.yaml
 dispatcher_url: "https://dispatch.example.com"
 
-node_id: "hk99-300m"
+node_id: "example-hk-highbw"
 agent_token: "CHANGE_ME"
 
-name: "HK99 High Bandwidth Compute Server"
+name: "Example HK High Bandwidth Compute Server"
 region: "HK"
-provider: "HK99"
+provider: "ExampleProvider"
 
 roles:
   - compute_server
@@ -60,4 +60,4 @@ agent:
   work_dir: "/opt/wuzhu-dispatch/work"
   log_dir: "/opt/wuzhu-dispatch/logs"
   allowed_hermes_workspaces:
-    - /home/hermes/stock/stackAnalys
+    - /home/example/workspace

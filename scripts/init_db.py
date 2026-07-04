@@ -23,12 +23,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "dispatcher"))
 import app.models  # noqa: F401 — registers all ORM models
 from app.database import engine, Base
 from app.config import settings
+from sqlalchemy.engine import make_url
+
+
+def safe_db_url(url: str) -> str:
+    """Redact the password from a database URL for safe logging."""
+    try:
+        u = make_url(url)
+        if u.password:
+            u = u.set(password="***")
+        return str(u)
+    except Exception:
+        return "<redacted database url>"
 
 
 async def main():
     db_url = settings.database_url or \
         f"mysql+asyncmy://{settings.mysql_user}@{settings.mysql_host}:{settings.mysql_port}/{settings.mysql_database}"
-    print(f"Connecting to: {db_url}")
+    print(f"Connecting to database...")
     print(f"Tables: users, sessions, client_api_tokens, compute_nodes, "
           f"compute_node_status, tasks, task_logs, artifacts, audit_logs")
     async with engine.begin() as conn:

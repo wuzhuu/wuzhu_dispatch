@@ -214,7 +214,7 @@
     form.appendChild(formGroup('Username', 'text', 'username', 'username'));
     form.appendChild(formGroup('Password', 'password', 'password', 'current-password'));
 
-    var errDiv = el('div', { 'id': 'loginError', 'class': 'error', 'style': 'display:none' });
+    var errDiv = el('div', { 'id': 'loginError', 'class': 'error hidden' });
     form.appendChild(errDiv);
 
     var btn = el('button', { 'type': 'submit', 'class': 'btn' }, [textNode('Login')]);
@@ -231,13 +231,13 @@
         credentials: 'include',
       });
       if (r.ok) {
-        document.getElementById('loginLink').style.display = 'none';
-        document.getElementById('logoutLink').style.display = 'inline';
+        document.getElementById('loginLink').classList.add('hidden');
+        document.getElementById('logoutLink').classList.remove('hidden');
         await navigateTo('overview');
       } else {
         var err = document.getElementById('loginError');
         err.textContent = 'Invalid username or password';
-        err.style.display = 'block';
+        err.classList.remove('hidden');
       }
     });
     main.appendChild(form);
@@ -250,8 +250,8 @@
   async function handleLogout() {
     // Use apiPost which includes CSRF token from cookie
     await apiPost('/api/v1/auth/logout');
-    document.getElementById('loginLink').style.display = 'inline';
-    document.getElementById('logoutLink').style.display = 'none';
+    document.getElementById('loginLink').classList.remove('hidden');
+    document.getElementById('logoutLink').classList.add('hidden');
     showLogin();
   }
 

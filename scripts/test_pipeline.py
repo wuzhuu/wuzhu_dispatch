@@ -135,7 +135,7 @@ async def main():
         # ═══════════════════════════════════════════════════════════
         node1_req = NodeRegisterRequest(
             node_id="us-node-1", agent_token="token-us-1",
-            name="US Worker", region="US", provider="LACloud",
+            name="US Worker", region="US", provider="TestProvider",
             roles=["compute_server"],
             tags=["us", "foreign_reachable", "public_ipv4"],
             static_profile={
@@ -151,7 +151,7 @@ async def main():
 
         node2_req = NodeRegisterRequest(
             node_id="hk-node-2", agent_token="token-hk-2",
-            name="HK Small", region="HK", provider="CheapVPS",
+            name="HK Small", region="HK", provider="TestProvider",
             roles=["compute_server"],
             tags=["hk", "cn_reachable", "low_bandwidth", "ipv6_only"],
             static_profile={

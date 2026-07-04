@@ -76,7 +76,7 @@
 # 1. 系统依赖
 sudo apt update && sudo apt install -y python3 python3-venv python3-pip mysql-server
 
-# 2. 创建数据库和用户
+# 2. 创建数据库和用户（不要使用 MySQL root 作为应用连接用户）
 sudo mysql -e "CREATE DATABASE IF NOT EXISTS wuzhu_dispatch CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 sudo mysql -e "CREATE USER IF NOT EXISTS 'wuzhu_dispatch'@'localhost' IDENTIFIED BY 'your_strong_password';"
 sudo mysql -e "GRANT ALL PRIVILEGES ON wuzhu_dispatch.* TO 'wuzhu_dispatch'@'localhost';"
@@ -115,7 +115,7 @@ curl http://localhost:8000/health
 ```ini
 # /etc/systemd/system/wuzhu-dispatcher.service
 [Unit]
-Description=wuzhu-dispatch dispatcher
+Description=wuzhu-dispatch dispatcher (central control plane)
 After=network-online.target mysql.service
 Wants=network-online.target
 
@@ -128,6 +128,13 @@ ExecStart=/opt/wuzhu-dispatch/dispatcher/venv/bin/uvicorn app.main:app --host 0.
 Restart=always
 RestartSec=10
 
+# ── Security hardening ─────────────────────────────────────────
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/wuzhu-dispatch /var/log/wuzhu-dispatch
+
 [Install]
 WantedBy=multi-user.target
 ```
@@ -135,14 +142,28 @@ WantedBy=multi-user.target
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now wuzhu-dispatcher
+
+# 配置文件权限加固
+sudo chown -R wuzhu:wuzhu /opt/wuzhu-dispatch
+sudo chmod 600 /opt/wuzhu-dispatch/.env
 ```
 
-#### HTTPS（Caddy 推荐）
+#### HTTPS（Caddy 推荐，含安全头）
 
 ```caddy
 # /etc/caddy/Caddyfile
 dispatch.example.com {
     reverse_proxy localhost:8000
+
+    # Security headers
+    header {
+        Content-Security-Policy "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; connect-src 'self'; img-src 'self' data:; style-src 'self'; form-action 'self'"
+        X-Frame-Options "DENY"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "same-origin"
+        Permissions-Policy "geolocation=(), microphone=(), camera=()"
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    }
 }
 ```
 
@@ -162,8 +183,18 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
     }
+
+    # Security headers
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; connect-src 'self'; img-src 'self' data:; style-src 'self'; form-action 'self'" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "same-origin" always;
+    add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
 }
 ```
+
+> ⚠️ 反代层安全头与 Dispatcher 应用层安全头共同提供纵深防御。即使应用层 middleware 已设置，反代层也不应省略，防止静态文件、错误页或未来改动漏掉安全头。
 
 ---
 
@@ -181,12 +212,12 @@ server {
 # /etc/wuzhu-dispatch/node.yaml
 dispatcher_url: "https://dispatch.example.com"
 
-node_id: "hk99-300m"                    # 全局唯一标识
+node_id: "example-hk-highbw"            # 全局唯一标识
 agent_token: "CHANGE_ME"                # 节点认证 token (不是 client token)
 
-name: "HK99 High Bandwidth"
+name: "Example HK High Bandwidth"
 region: "HK"
-provider: "HK99"
+provider: "ExampleProvider"
 
 tags:
   - hk
@@ -226,7 +257,7 @@ agent:
   work_dir: "/opt/wuzhu-dispatch/work"
   log_dir: "/opt/wuzhu-dispatch/logs"
   allowed_hermes_workspaces:
-    - /home/hermes/stock
+    - /home/example/workspace
 ```
 
 #### 安装与启动
@@ -275,11 +306,11 @@ curl -X POST https://dispatch.example.com/api/v1/admin/nodes/register \
   -H "Authorization: Bearer $DISPATCH_SERVER_SECRET" \
   -H "Content-Type: application/json" \
   -d '{
-    "node_id": "hk99-300m",
+    "node_id": "example-hk-highbw",
     "agent_token": "CHANGE_ME",
-    "name": "HK99 High Bandwidth",
+    "name": "Example HK High Bandwidth",
     "region": "HK",
-    "provider": "HK99",
+    "provider": "ExampleProvider",
     "tags": ["hk", "high_bandwidth"],
     "static_profile": {
       "cpu_cores": 2,
@@ -386,9 +417,19 @@ dispatch-client task logs <task_id>
 | **Client** | 不持有 node token，不知道 MySQL 密码 |
 | **DISPATCH_SERVER_SECRET** | 仅用于 bootstrap / admin / system 操作，生产环境优先使用用户登录或 `client_api_token` |
 | **Dashboard** | 使用 HttpOnly + Secure + SameSite Cookie，不使用 localStorage |
-| **日志** | Dashboard 中所有用户可控数据通过 `textContent` 渲染，禁止 `innerHTML` |
+| **日志** | Dashboard 中所有用户可控数据通过 `textContent` 渲染，禁止 `innerHTML`；所有 inline `style` 已替换为 CSS class |
 | **配置文件权限** | `.env`、`node.yaml`、`client.yaml` 设为 `600` |
 | **agent_token** | Compute Server 的 node token，不是 client token，不要混用 |
+| **CSP** | `script-src 'self'` — 无 inline script；`style-src 'self'` — 无 unsafe-inline |
+| **client_api_token.scope** | ⚠️ MVP 预留字段，当前 token 权限继承所属用户 role，不依赖 scope 做权限隔离 |
+
+### 公开仓库注意事项
+
+> 本仓库为 **public** 仓库，请遵守以下规则：
+> - 不要提交真实配置（`.env`、`node.yaml`、`client.yaml`、`*.pem`、`*.key`）
+> - 示例文件必须使用占位符（`CHANGE_ME`、`your-*`）
+> - 生产环境密钥必须修改默认值
+> - 如果历史提交过真实 token/密码，必须立即轮换（详见 `docs/security.md`）
 
 ---
 

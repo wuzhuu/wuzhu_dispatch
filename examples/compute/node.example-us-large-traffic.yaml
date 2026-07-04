@@ -1,17 +1,24 @@
+# Compute Server configuration: Large-traffic node (US region)
+# Path: /etc/wuzhu-dispatch/node.yaml
 dispatcher_url: "https://dispatch.example.com"
-node_id: "lacloud-us"
-agent_token: "CHANGE_ME_AGENT_TOKEN"
-name: "LACloud US Worker"
+
+node_id: "example-us-large-traffic"
+agent_token: "CHANGE_ME"
+
+name: "Example US Large Traffic Worker"
 region: "US"
-provider: "LACloud"
+provider: "ExampleUSProvider"
+
 roles:
   - worker
+
 tags:
   - us
   - high_traffic
   - foreign_reachable
   - public_ipv4
   - hermes_worker
+
 static_profile:
   cpu_cores: 2
   memory_mb: 2048
@@ -29,6 +36,7 @@ static_profile:
     max_parallel_tasks: 2
     allow_heavy_download: true
     allow_heavy_compute: false
+
 agent:
   heartbeat_interval_seconds: 20
   pull_interval_seconds: 10

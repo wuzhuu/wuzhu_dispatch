@@ -1,17 +1,24 @@
+# Compute Server configuration: IPv6-only low-resource probe node
+# Path: /etc/wuzhu-dispatch/node.yaml
 dispatcher_url: "https://dispatch.example.com"
-node_id: "cheaphk-ipv6"
-agent_token: "CHANGE_ME_AGENT_TOKEN"
-name: "Cheap HK IPv6-Only"
+
+node_id: "example-ipv6-probe"
+agent_token: "CHANGE_ME"
+
+name: "Example IPv6 Probe"
 region: "HK"
-provider: "CheapVPS"
+provider: "ExampleProvider"
+
 roles:
   - worker
+
 tags:
   - hk
   - ipv6_only
   - low_bandwidth
   - low_performance
   - cn_reachable
+
 static_profile:
   cpu_cores: 1
   memory_mb: 512
@@ -29,6 +36,7 @@ static_profile:
     max_parallel_tasks: 1
     allow_heavy_download: false
     allow_heavy_compute: false
+
 agent:
   heartbeat_interval_seconds: 30
   pull_interval_seconds: 20

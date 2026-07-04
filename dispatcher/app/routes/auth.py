@@ -71,8 +71,8 @@ async def login(
         value=session_id,
         max_age=settings.session_ttl_seconds,
         httponly=True,
-        secure=True,
-        samesite="strict",
+        secure=False,
+        samesite="lax",
         path="/",
     )
     # CSRF token cookie (JS-readable)
@@ -82,8 +82,8 @@ async def login(
         value=csrf_value,
         max_age=settings.session_ttl_seconds,
         httponly=False,
-        secure=True,
-        samesite="strict",
+        secure=False,
+        samesite="lax",
         path="/",
     )
 

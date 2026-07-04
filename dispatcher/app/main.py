@@ -105,12 +105,12 @@ def create_app() -> FastAPI:
     @app.get("/admin", include_in_schema=False)
     async def admin_dashboard(request: Request):
         """Web Dashboard entry point."""
-        return templates.TemplateResponse("dashboard.html", {"request": request})
+        return templates.TemplateResponse(request, "dashboard.html", {"request": request})
 
     @app.get("/admin/{path:path}", include_in_schema=False)
     async def admin_dashboard_spa(request: Request, path: str):
         """Catch-all SPA fallback."""
-        return templates.TemplateResponse("dashboard.html", {"request": request})
+        return templates.TemplateResponse(request, "dashboard.html", {"request": request})
 
     @app.get("/health")
     async def health():

@@ -441,6 +441,35 @@ dispatch-client task create --type probe_dns --payload examples/tasks/probe_dns.
 CLI 仅支持 Bearer Client API Token 认证，不支持 Cookie/CSRF 登录。
 如需 Web 管理，使用 `/admin` Dashboard 登录。
 
+#### Hermes Skill 安装（推荐）
+
+如果你使用 [Hermes Agent](https://hermes-agent.nousresearch.com)，可通过加载 `dispatch-client` skill 直接在对话中调度任务：
+
+```bash
+# 方法 A：从仓库安装到本机 Hermes
+cp -r skills/dispatch-client ~/.hermes/skills/software-development/
+
+# 方法 B：通过 hermes CLI 注册（如果 hermes 支持 skill install）
+hermes skill install skills/dispatch-client/SKILL.md
+
+# 方法 C：仓库已配置 deploy key，拉取最新 skill
+cd /opt/wuzhu-dispatch && git pull
+```
+
+安装后 Hermes 会在对话中自动加载 `dispatch-client` skill，提供以下能力：
+
+| 操作 | Hermes 指令 |
+|------|------------|
+| 快速 Shell 任务 | `skill.quick(mode="shell", command="echo hello")` |
+| 按节点调度 | `skill.quick(mode="shell", command="uptime", target_node="hk99")` |
+| 按标签调度 | `skill.quick(mode="shell", command="df -h", target_tags=["hk"])` |
+| Hermes 任务 | `skill.quick(mode="hermes", command="写一个Python脚本检查磁盘")` |
+| 查询任务状态 | `skill.get_task(task_id)` |
+| 查看任务日志 | `skill.get_task_logs(task_id)` |
+| 列出在线节点 | `skill.list_nodes()` |
+
+**前置条件：** 需要有 `client.yaml` 配置文件（`~/.config/wuzhu-dispatch/client.yaml`），内含 `dispatcher_url` 和 `client_token`（admin 角色 token，因为 Shell/Hermes 任务需要 admin 权限）。
+
 ---
 
 ## 管理员入门

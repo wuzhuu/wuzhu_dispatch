@@ -443,16 +443,18 @@ CLI 仅支持 Bearer Client API Token 认证，不支持 Cookie/CSRF 登录。
 
 #### Hermes Skill 安装（推荐）
 
-如果你使用 [Hermes Agent](https://hermes-agent.nousresearch.com)，可通过加载 `dispatch-client` skill 直接在对话中调度任务：
+如果你使用 [Hermes Agent](https://hermes-agent.nousresearch.com)，可通过加载 dispatch skill 直接在对话中管理集群：
+
+**dispatch-client** — 向任意节点派发任务（适用于需要调度的 Hermes 用户）
+
+**dispatch-worker-node** — 管理计算节点自身（适用于所有 Worker 节点）
 
 ```bash
-# 方法 A：从仓库安装到本机 Hermes
+# 从仓库安装到本机 Hermes
 cp -r skills/dispatch-client ~/.hermes/skills/software-development/
+cp -r skills/dispatch-worker-node ~/.hermes/skills/software-development/
 
-# 方法 B：通过 hermes CLI 注册（如果 hermes 支持 skill install）
-hermes skill install skills/dispatch-client/SKILL.md
-
-# 方法 C：仓库已配置 deploy key，拉取最新 skill
+# 拉取最新 skill（如果仓库已 clone）
 cd /opt/wuzhu-dispatch && git pull
 ```
 

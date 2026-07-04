@@ -323,6 +323,59 @@ curl -X POST https://dispatch.example.com/api/v1/admin/nodes/register \
 ```
 注意：`agent_token` 是 **node token**（计算节点身份），不是 client token。
 
+#### 工作目录清理 (Cleanup)
+
+Shell 任务在执行时会在 `work_dir/<task_id>/` 下创建临时工作目录。
+长期运行后可能堆积 CSV、HTML、图片、压缩包等文件，导致磁盘占满。
+
+**默认清理策略：**
+
+| 任务状态 | 默认行为 | 保留时间 |
+|---------|---------|---------|
+| `success` | ✅ 删除 | 1 小时 (`keep_success_seconds: 3600`) |
+| `failed` | ❌ 保留 | 24 小时 (`keep_failed_seconds: 86400`) |
+| `timeout` | ❌ 保留 | 24 小时 (`keep_timeout_seconds: 86400`) |
+
+**配置方式（`node.yaml` 或 `client.yaml` 均可）：**
+
+```yaml
+cleanup:
+  enabled: true                    # 全局开关
+  cleanup_success: true            # 清理成功任务目录
+  cleanup_failed: false            # 清理失败任务目录
+  cleanup_timeout: false           # 清理超时任务目录
+  keep_success_seconds: 3600       # 成功任务保留时间
+  keep_failed_seconds: 86400       # 失败任务保留时间
+  keep_timeout_seconds: 86400      # 超时任务保留时间
+  cleanup_interval_seconds: 300    # 后台扫描间隔
+  max_work_dir_size_mb: 2048       # 工作目录大小上限
+  delete_empty_dirs: true          # 删除空目录
+```
+
+**安全限制：**
+- 只能删除 `work_dir` 下一级、名称匹配 `[A-Za-z0-9_.-]` 的目录
+- `allowed_hermes_workspaces` 永远不会被自动清理
+- 路径穿越（如 `../../etc`）会被严格拒绝
+- task_id 非法字符（`/`、`\0`、空格等）被拒
+
+**手动清理：**
+```bash
+# 清理单个任务目录
+rm -rf /opt/wuzhu-dispatch/work/<task_id>
+
+# 清理所有超过 24h 的目录
+find /opt/wuzhu-dispatch/work -maxdepth 1 -type d -mtime +1 -name "[A-Za-z0-9_.-]*" -exec rm -rf {} +
+
+# 查看当前占用
+du -sh /opt/wuzhu-dispatch/work
+```
+
+**禁用清理：**
+```yaml
+cleanup:
+  enabled: false
+```
+
 ---
 
 ### 3. Client（客户端）
@@ -458,6 +511,7 @@ dispatch-client task logs <task_id>
 pip install -r dispatcher/requirements.txt
 python3 -m compileall -q dispatcher compute-server client common scripts
 python3 scripts/test_pipeline.py          # 48 项单元测试
+python3 scripts/test_cleanup.py           # 38 项清理模块测试
 python3 scripts/test_route_integration.py  # 50 项路由集成测试
 ```
 

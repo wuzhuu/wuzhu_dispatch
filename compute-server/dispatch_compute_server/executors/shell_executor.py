@@ -94,10 +94,11 @@ class ShellExecutor:
         output = {"stdout": stdout_str, "stderr": stderr_str, "exit_code": proc.returncode or 0}
 
         if proc.returncode == 0:
-            return {"success": True, "output": output}
+            return {"success": True, "output": output, "task_work_dir": safe_dir}
         else:
             return {
                 "success": False,
                 "error": f"Command failed (exit {proc.returncode}): {stderr_str[:2000]}",
                 "traceback": stderr_str,
+                "task_work_dir": safe_dir,
             }

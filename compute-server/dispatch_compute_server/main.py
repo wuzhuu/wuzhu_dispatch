@@ -22,6 +22,12 @@ from typing import Optional
 
 from .client import ComputeClient
 from .config import ComputeServerConfig
+from .cleanup import (
+    cleanup_expired_task_dirs,
+    cleanup_task_dir,
+    is_safe_child_path,
+    is_valid_task_dir_name,
+)
 from .executor import execute_task
 from .metrics import collect_metrics
 
@@ -82,6 +88,10 @@ class ComputeServer:
         self._consecutive_errors: int = 0
         self._last_full_metrics: float = 0.0
 
+        # ── Task outcomes for cleanup decisions ──────────────────
+        # Maps task_id -> {"status": str, "finish_time": float}
+        self._task_outcomes: dict[str, dict] = {}
+
         os.makedirs(config.work_dir, exist_ok=True)
         os.makedirs(config.log_dir, exist_ok=True)
 
@@ -112,6 +122,7 @@ class ComputeServer:
         last_pull = 0.0
         last_renew_check = 0.0
         last_state_transition_log = 0.0
+        last_cleanup = 0.0
 
         while not self._shutdown:
             now = time.time()
@@ -134,6 +145,11 @@ class ComputeServer:
             # ── Check running tasks
             await self._check_tasks()
 
+            # ── Background cleanup loop
+            if now - last_cleanup >= self.config.cleanup.cleanup_interval_seconds:
+                await self._do_cleanup()
+                last_cleanup = now
+
             # ── Log state transitions occasionally
             if now - last_state_transition_log >= 60:
                 if self._consecutive_errors > 0:
@@ -144,6 +160,26 @@ class ComputeServer:
             await asyncio.sleep(0.5)
 
         logger.info("Compute server shutting down.")
+
+    # ── Cleanup ───────────────────────────────────────────────────
+
+    async def _do_cleanup(self):
+        """Background cleanup pass — remove expired task directories."""
+        try:
+            removed, remaining = await asyncio.to_thread(
+                cleanup_expired_task_dirs,
+                self.config.work_dir,
+                self.config.cleanup,
+                self.config.allowed_hermes_workspaces,
+                self._task_outcomes,
+            )
+            if removed > 0:
+                logger.info(
+                    "Cleanup: removed %d task dir(s), %d remaining",
+                    removed, remaining,
+                )
+        except Exception:
+            logger.exception("Background cleanup failed")
 
     # ── State helpers ─────────────────────────────────────────────
 
@@ -281,6 +317,21 @@ class ComputeServer:
             result = {"success": False, "error": "Unexpected executor error",
                       "traceback": tb_module.format_exc()}
 
+        # Determine outcome for cleanup decision
+        outcome_status = "success" if result.get("success") else "failed"
+        # Check if it was a timeout
+        if not result.get("success") and "timed out" in result.get("error", "").lower():
+            outcome_status = "timeout"
+
+        # Record outcome for the background cleanup loop
+        self._task_outcomes[task_id] = {
+            "status": outcome_status,
+            "finish_time": time.time(),
+        }
+
+        # Prune stale outcomes (keep max 24h of history)
+        self._prune_stale_outcomes()
+
         if result["success"]:
             try:
                 self.client.upload_log(task_id, "INFO", "Task completed successfully")
@@ -302,6 +353,16 @@ class ComputeServer:
         self._state = self.STATE_WARM_IDLE
         return result
 
+    def _prune_stale_outcomes(self, max_age: float = 86400):
+        """Remove task outcomes older than *max_age* seconds."""
+        now = time.time()
+        stale = [
+            tid for tid, info in self._task_outcomes.items()
+            if now - info["finish_time"] > max_age
+        ]
+        for tid in stale:
+            self._task_outcomes.pop(tid, None)
+
     # ── Check running tasks ───────────────────────────────────────
 
     async def _check_tasks(self):
@@ -315,6 +376,11 @@ class ComputeServer:
             timeout = rt.task.get("timeout_seconds", 3600)
             if rt.future is None and now - rt.start_time > timeout:
                 logger.warning("Task %s timed out after %ds (never started)", tid, timeout)
+                # Record timeout outcome
+                self._task_outcomes[tid] = {
+                    "status": "timeout",
+                    "finish_time": now,
+                }
                 try:
                     self.client.upload_log(tid, "ERROR",
                                            f"Task timed out after {timeout}s")

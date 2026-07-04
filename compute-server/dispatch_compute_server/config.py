@@ -7,6 +7,30 @@ from typing import Any
 import yaml
 
 
+class CleanupConfig:
+    """Cleanup policy for task work directories.
+
+    Controls if and when task directories under ``work_dir/<task_id>/``
+    are removed after their tasks complete.
+
+    Defaults are chosen to preserve failed/timeout directories for
+    debugging while cleaning up successful tasks after 1 hour.
+    """
+
+    def __init__(self, data: dict[str, Any] | None = None):
+        data = data or {}
+        self.enabled: bool = data.get("enabled", True)
+        self.cleanup_success: bool = data.get("cleanup_success", True)
+        self.cleanup_failed: bool = data.get("cleanup_failed", False)
+        self.cleanup_timeout: bool = data.get("cleanup_timeout", False)
+        self.keep_success_seconds: int = data.get("keep_success_seconds", 3600)
+        self.keep_failed_seconds: int = data.get("keep_failed_seconds", 86400)
+        self.keep_timeout_seconds: int = data.get("keep_timeout_seconds", 86400)
+        self.cleanup_interval_seconds: int = data.get("cleanup_interval_seconds", 300)
+        self.max_work_dir_size_mb: int = data.get("max_work_dir_size_mb", 2048)
+        self.delete_empty_dirs: bool = data.get("delete_empty_dirs", True)
+
+
 class ComputeServerConfig:
     """Typed wrapper around node.yaml."""
 
@@ -64,6 +88,9 @@ class ComputeServerConfig:
         self.log_dir: str = agent_cfg.get("log_dir", "/opt/wuzhu-dispatch/logs")
         self.allowed_hermes_workspaces: list[str] = agent_cfg.get("allowed_hermes_workspaces", [])
         self.hermes_bin: str = agent_cfg.get("hermes_bin", "hermes")
+
+        # ── Cleanup policy ───────────────────────────────────────────
+        self.cleanup: CleanupConfig = CleanupConfig(data.get("cleanup", {}))
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "ComputeServerConfig":

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>wuzhu-dispatch Dashboard</title>
-<link rel="stylesheet" href="/static/dashboard.css">
+<link rel="stylesheet" href="/static/dashboard.css?v=2">
 </head>
 <body>
   <nav class="nav">
@@ -14,6 +14,7 @@
         <a href="/admin" class="nav-link" data-page="overview">Overview</a>
         <a href="/admin/nodes" class="nav-link" data-page="nodes">Nodes</a>
         <a href="/admin/tasks" class="nav-link" data-page="tasks">Tasks</a>
+        <a href="/admin/users" class="nav-link" data-page="users">Users</a>
         <a href="/admin/login" class="nav-link" id="loginLink">Login</a>
         <a href="/admin/logout" class="nav-link hidden" id="logoutLink">Logout</a>
       </div>
@@ -24,6 +25,6 @@
     <div class="loading">Loading dashboard...</div>
   </main>
 
-  <script src="/static/dashboard.js" defer></script>
+  <script src="/static/dashboard.js?v=2" defer></script>
 </body>
 </html>

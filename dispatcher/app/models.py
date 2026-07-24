@@ -87,6 +87,8 @@ class Session(Base):
     expires_at: Mapped[datetime] = Column(DateTime, nullable=False)
     created_at: Mapped[datetime] = Column(DateTime, default=datetime.utcnow)
     last_seen_at: Mapped[datetime | None] = Column(DateTime, nullable=True)
+    ip_address: Mapped[str | None] = Column(String(64), nullable=True)
+    user_agent: Mapped[str | None] = Column(String(512), nullable=True)
 
     def __repr__(self) -> str:
         return f"<Session user_id={self.user_id!r}>"

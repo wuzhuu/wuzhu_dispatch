@@ -65,7 +65,14 @@ class Settings(BaseSettings):
 
     @property
     def effective_registration_token(self) -> str:
-        return self.registration_token or self.dispatch_server_secret
+        if self.registration_token:
+            return self.registration_token
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            "REGISTRATION_TOKEN not set — falling back to DISPATCH_SERVER_SECRET. "
+            "Set a separate REGISTRATION_TOKEN in .env for security isolation."
+        )
+        return self.dispatch_server_secret
 
     @property
     def cors_origins_list(self) -> list[str]:
@@ -81,6 +88,7 @@ settings = Settings()
 
 def check_production_settings():
     """Refuse to start if running in production with default secrets."""
+    logger = logging.getLogger(__name__)
     if settings.environment == "production":
         defaults = {
             "DISPATCH_SERVER_SECRET": settings.dispatch_server_secret,
@@ -98,5 +106,17 @@ def check_production_settings():
                 "value 'change-me-session-secret'. Set a strong random secret "
                 "in .env or the environment before running in production mode."
             )
-        logger = logging.getLogger(__name__)
         logger.info("Production mode — secrets validated.")
+    else:
+        # Warn in development mode too
+        if settings.dispatch_server_secret == "change-me-secret":
+            logger.warning(
+                "DEVELOPMENT WARNING: DISPATCH_SERVER_SECRET is still the default "
+                "value 'change-me-secret'. Do not expose this server to untrusted networks."
+            )
+        if settings.session_secret == "change-me-session-secret":
+            logger.warning(
+                "DEVELOPMENT WARNING: SESSION_SECRET is still the default "
+                "value 'change-me-session-secret'. Do not expose this server to "
+                "untrusted networks."
+            )

@@ -66,12 +66,17 @@ async def login(
     db.add(session)
     await db.commit()
 
+    # record IP and UA in session for fingerprinting
+    session.ip_address = request.client.host if request.client else None
+    session.user_agent = request.headers.get("User-Agent", "")[:512]
+
+    is_https = request.url.scheme == "https"
     response.set_cookie(
         key="dispatch_session",
         value=session_id,
         max_age=settings.session_ttl_seconds,
         httponly=True,
-        secure=False,
+        secure=is_https,
         samesite="lax",
         path="/",
     )
@@ -82,7 +87,7 @@ async def login(
         value=csrf_value,
         max_age=settings.session_ttl_seconds,
         httponly=False,
-        secure=False,
+        secure=is_https,
         samesite="lax",
         path="/",
     )

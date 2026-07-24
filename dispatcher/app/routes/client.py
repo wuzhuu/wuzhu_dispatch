@@ -401,12 +401,23 @@ async def _create_direct_task(
         created_by_client_token_id=ctx.token_id or ("system" if ctx.is_system else None),
     )
 
+    # Log audit with shell command content for security visibility
+    audit_detail: dict = {"type": req.type, "mode": mode, "priority": req.priority}
+    if mode == "shell":
+        command = (
+            execution.get("command")
+            or req.payload.get("command")
+            or ""
+        )
+        if command:
+            audit_detail["command_preview"] = command[:200]
+
     await log_audit(
         db, f"task.create.{mode or 'direct'}",
         user_id=str(ctx.user_id or "system"),
         target_type="task", target_id=task.task_id,
         ip_address=request.client.host if request.client else None,
-        detail={"type": req.type, "mode": mode, "priority": req.priority},
+        detail=audit_detail,
     )
     return task
 

@@ -1,0 +1,53 @@
+# Portable Stock Hermes gateway configuration.
+# Copy to runtime/hermes-home/config.yaml during provisioning.
+# Secrets belong in runtime/hermes/email.env or the external secret store.
+# Do not commit a populated config.yaml containing credentials.
+
+model:
+  default: gpt-5.6-luna
+  provider: trankey
+  base_url: https://transfer.31411414.xyz/v1
+  context_length: detect
+  supports_vision: true
+  api_mode: codex_responses
+
+providers:
+  trankey:
+    name: trankey
+    base_url: https://transfer.31411414.xyz/v1
+    key_env: TRANKEY_API_KEY
+    api_mode: codex_responses
+    default_model: gpt-5.6-luna
+    models:
+      gpt-5.6-luna:
+        supports_vision: true
+
+auxiliary:
+  vision:
+    provider: trankey
+    model: naive
+    api_mode: chat_completions
+    timeout: 120
+    download_timeout: 30
+
+agent:
+  image_input_mode: text
+  environment_probe: false
+  gateway_timeout: 1800
+  max_turns: 1000
+  reasoning_effort: high
+  tool_use_enforcement: auto
+
+platforms:
+  email:
+    enabled: true
+    skip_attachments: false
+
+terminal:
+  backend: local
+  timeout: 180
+
+compression:
+  enabled: true
+  threshold: 0.75
+  target_ratio: 0.7

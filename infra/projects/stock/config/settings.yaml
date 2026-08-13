@@ -1,0 +1,218 @@
+api:
+  keys_path: key/api_keys.yaml
+collector:
+  backfill_start_date: '2018-01-01'
+  daily_price_max_stocks: 0
+  daily_price_write_batch_size: 200
+  disable_proxy: true
+  fallback_circuit_breaker_cooldown_seconds: 3600
+  fallback_circuit_breaker_failures: 10
+  max_retry: 3
+  recent_gap_lookback_days: 7
+  retry_sleep_seconds: 5
+  retry_times: 3
+  # sina_spot_daily 并行采集调优
+  sina_batch_size: 200          # 之前80，减少HTTP请求数 5197/200≈26批次（之前65批次）
+  sina_max_concurrency: 20      # 之前10
+  sina_qps: 15                  # 之前5，峰值实际只到5，升到15留余量
+  sina_retries: 2
+  sina_resume_enabled: true
+  sina_timeout: 8               # 之前10
+  sina_write_flush_batches: 20  # 之前10，减少flush次数
+  sina_write_temp_before_close: true
+  sleep_seconds: 0.3
+  start_date: '20150101'
+data:
+  lake_root: lake
+  log_root: ~/stock/logs
+  parquet_root: parquet
+  raw_root: raw
+  report_root: reports
+  root: ~/stock/stock_local_ai_data
+data_source:
+  daily_price_current_primary: sina_spot_daily
+  daily_price_bse_fallback: tencent_history_direct
+  daily_price_bse_primary: sina_history_direct
+  daily_price_fallback: tencent                              # baostock 为主源，tencent 为备用
+  daily_price_fallback_extra: akshare.stock_zh_a_hist_tx
+  daily_price_history_fallback_extra: akshare.stock_zh_a_hist
+  daily_price_primary: baostock                              # baostock 已解封，升为主源
+  daily_price_history_fallback: tencent                      # baostock 已解封，tencent 为备用
+  daily_price_history_primary: baostock                      # baostock 已解封，升为主源
+  index_daily_fallback: eastmoney
+  index_daily_primary: sina
+  stock_basic_fallback: baostock
+  stock_basic_primary: baostock                             # AKShare SZSE 频繁 ConnectionReset，直接走 baostock
+  use_paid_api: false
+  use_tushare: false
+data_source_plan:
+  adjusted_price:
+    fallback: baostock.adjustflag
+    primary: akshare.stock_zh_a_hist_adjust
+  announcements:
+    fallback: exchange_public_disclosure
+    primary: cninfo
+  daily_price:
+    current_primary: sina_spot_daily
+    current_candidates:
+    - sina_spot_daily
+    - baostock.query_history_k_data_plus
+    - akshare.stock_zh_a_hist
+    - westock-data.kline
+    bse_fallback: tencent_history_direct
+    bse_primary: sina_history_direct
+    history_optional: akshare.stock_zh_a_hist_tx
+    history_fallback: akshare.stock_zh_a_hist
+    history_primary: baostock.query_history_k_data_plus
+    history_candidates:
+    - baostock.query_history_k_data_plus
+    - akshare.stock_zh_a_hist
+    - akshare.stock_zh_a_hist_tx
+    - westock-data.kline
+    fallback: akshare.stock_zh_a_hist
+    primary: baostock.query_history_k_data_plus
+  financial_indicators:
+    fallback: baostock.quarterly_finance
+    primary: akshare.financial_interfaces
+  index_daily:
+    fallback: akshare.index_zh_a_hist
+    primary: baostock.query_history_k_data_plus.index
+  institution_holdings:
+    fallback: announcements_and_annual_reports
+    primary: akshare.stock_institute_hold
+  long_history:
+    fallback: akshare
+    primary: baostock
+  news:
+    fallback: rss
+    primary: akshare.finance_news
+  sectors:
+    fallback: eastmoney_public_pages
+    primary: akshare.eastmoney_board
+  stock_basic:
+    fallback: baostock.query_all_stock
+    primary: akshare.stock_info_a_code_name
+database:
+  duckdb_path: ~/stock/stock_local_ai_data/stock_data_v2.duckdb
+free_sources:
+  akshare:
+    enabled: true
+    providers:
+      eastmoney: true
+      netease: true
+      sina: true
+      tencent: true
+  baostock:
+    enabled: true
+  rss_news:
+    enabled: true
+    keys_dir: ~/key/
+    global_qps: 5
+    retries: 1
+    timeout:
+    - 10
+    - 20
+    feeds:
+    - source_id: chinanews_finance
+      url: https://www.chinanews.com.cn/rss/finance.xml
+      category: chinese_rss
+      language: zh
+    - source_id: tomshardware
+      url: https://www.tomshardware.com/feeds/all
+      category: semiconductor_rss
+      language: en
+    - source_id: semiengineering
+      url: https://semiengineering.com/feed/
+      category: semiconductor_rss
+      language: en
+    - source_id: cnbc_news
+      url: https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114
+      category: international_rss
+      language: en
+    - source_id: marketwatch
+      url: https://feeds.marketwatch.com/marketwatch/topstories
+      category: international_rss
+      language: en
+  skillhub:
+    westock_data:
+      enabled: true               # 启用作为活跃数据源
+      candidate: false
+      requires_token: false
+      command: npx -y westock-data-skillhub@1.0.3
+      status: available_on_hermes_2026_07_01
+      recommended_use:
+      - daily_price_history        # 用于日线历史数据
+      - board_rank
+      - hot_stock
+      - lhb
+      - etf
+      - ipo_calendar
+    a_stock_analysis:
+      enabled: false
+      candidate: true
+      requires_token: false
+      command: uv run scripts/analyze.py
+      status: available_on_hermes_2026_07_01
+      recommended_use:
+      - intraday_volume
+      - spot_quote
+    aihot:
+      enabled: false
+      candidate: true
+      requires_token: false
+      status: available_on_hermes_2026_07_01
+      recommended_use:
+      - ai_industry_news
+    news_summary:
+      enabled: false
+      candidate: true
+      requires_token: false
+      status: available_on_hermes_2026_07_01
+      recommended_use:
+      - international_news
+    equal_data:
+      enabled: false
+      candidate: true
+      requires_token: true
+      status: available_on_hermes_2026_07_01
+      recommended_use:
+      - shareholder_change
+      - block_trade
+      - institutional_holdings
+      - management_holdings
+  stooq:
+    enabled: true
+  yahoo_finance:
+    enabled: true
+future_extensions:
+  newsapi:
+    enabled: false
+  tushare:
+    enabled: false
+market:
+  adjust_type: qfq
+  baostock_adjustflag: '2'
+project:
+  name: stackAnalys
+  phase: zero_token_free_sources
+  timezone: Asia/Shanghai
+schedule:
+  daily_update_time: '18:30'
+watcher:
+  check_times:
+  - '18:30'
+  - '19:00'
+  - '20:00'
+  enabled: true
+  max_daily_attempts: 3
+  min_complete_daily_price_rows: 3000
+  probe_symbols:
+  - sh.000300
+  - sz.000001
+  request_sleep_max: 2.5
+  request_sleep_min: 0.8
+  retry_backoff_seconds:
+  - 30
+  - 120
+  - 300
+  stop_if_source_unstable: true

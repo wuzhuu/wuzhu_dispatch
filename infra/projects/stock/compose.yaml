@@ -1,0 +1,56 @@
+services:
+  stock-scheduler:
+    image: hermes-stock:portable
+    build: .
+    container_name: hermes-stock-scheduler
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs: [/tmp]
+    environment:
+      STOCK_MODE: ${STOCK_MODE:-standby}
+      STOCK_LEASE_ROOT: ${STOCK_LEASE_ROOT:-/var/lib/stock/lease}
+      STOCK_LEASE_SECONDS: ${STOCK_LEASE_SECONDS:-300}
+      STOCK_DATA_ROOT: /var/lib/stock/data
+      STOCK_QUEUE_ROOT: /var/lib/stock/queue
+      STOCK_OPS_MAILBOX: mail@31411414.xyz
+    volumes:
+      - stock-data:/var/lib/stock/data
+      - stock-queue:/var/lib/stock/queue
+      - stock-lease:/var/lib/stock/lease
+    healthcheck:
+      test: ["CMD", "python", "-m", "runtime.health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    profiles: [primary, standby]
+  stock-maintenance:
+    image: hermes-stock:portable
+    build: .
+    container_name: hermes-stock-maintenance
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs: [/tmp]
+    command: ["maintenance"]
+    environment:
+      STOCK_MODE: ${STOCK_MODE:-standby}
+      STOCK_LEASE_ROOT: ${STOCK_LEASE_ROOT:-/var/lib/stock/lease}
+      STOCK_DATA_ROOT: /var/lib/stock/data
+      STOCK_QUEUE_ROOT: /var/lib/stock/queue
+      STOCK_OPS_MAILBOX: mail@31411414.xyz
+    volumes:
+      - stock-data:/var/lib/stock/data:ro
+      - stock-queue:/var/lib/stock/queue
+      - stock-lease:/var/lib/stock/lease:ro
+    expose: ["8081"]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    profiles: [primary, standby]
+volumes:
+  stock-data:
+  stock-queue:
+  stock-lease:
+

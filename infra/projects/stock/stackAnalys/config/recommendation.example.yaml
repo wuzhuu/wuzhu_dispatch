@@ -1,0 +1,57 @@
+recommendation:
+  enabled: true
+  recommendation_version: "v1"
+  selector_name: "raw_top_n"
+  selector_names:
+    - "raw_top_n"
+    - "confirmed_top_n"
+    - "low_turnover_top_n"
+  holding_period_days: 30
+  top_n: 10
+  run_mode: "live_shadow"
+  entry_price_type: "next_open"
+  exit_price_type: "close"
+  weighting: "equal"
+  benchmark_index: "sh.000300"
+  portfolio:
+    initial_capital: 1000000
+    batch_capital: 100000
+    position_notional: 10000
+
+universe:
+  min_history_days: 120
+  min_amount_ma20: 50000000
+  min_valid_days_20: 15
+  exclude_st: true
+  exclude_suspended: true
+  exclude_new_listing_days: 120
+  allowed_risk_levels:
+    - LOW
+    - MEDIUM
+  max_industry_count: 3
+
+scoring:
+  score_weight: 0.55
+  risk_weight: 0.20
+  industry_strength_weight: 0.10
+  news_weight: 0.15
+  require_news_signal: false
+  missing_news_policy: "neutral"
+
+stability:
+  confirmed_entry_top_n: 15
+  confirmed_entry_days: 2
+  confirmed_exit_top_n: 30
+  confirmed_exit_days: 2
+  replacement_score_gap: 0.03
+
+costs:
+  commission_rate: 0.0003
+  minimum_commission: 5.0
+  sell_stamp_duty_rate: 0.0005
+  slippage_rate: 0.001
+
+tracking:
+  update_daily: true
+  allow_overlapping_batches: true
+  calculate_multi_period_returns: true

@@ -1,0 +1,16 @@
+[Unit]
+Description=Bundled Stock Hermes Email Gateway
+Requires=stock-nas-mount.service
+After=network-online.target stock-nas-mount.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/hermes-stock/gateway-run.sh start
+ExecStop=/opt/hermes-stock/gateway-run.sh stop
+TimeoutStartSec=120
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

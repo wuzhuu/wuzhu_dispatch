@@ -1,0 +1,81 @@
+project_id: stock
+api_version: hermes.portable/v1
+artifact:
+  source: trusted_current_wuzhucloud_stock_checkout
+  release_strategy: immutable_tar_or_image
+  image: hermes-stock:portable
+runtime:
+  type: docker_compose
+  requires_docker: true
+  requires_systemd: false
+  command: ["python", "-m", "runtime.scheduler"]
+  health_command: ["python", "-m", "runtime.health"]
+health_check:
+  endpoint: http://stock-maintenance:8081/health
+  dependencies: [duckdb, data_sources, nas_upload_queue, singleton_lease]
+resources:
+  cpu: 2
+  memory_mib: 4096
+  disk_gib: 10
+placement:
+  hard_exclusions: [wuzhucloud, laddo, LA199, cheapHK, cheapJP, FreeSG, wuzhunas]
+  hard_requirements: [registered_in_nezha, docker, no_minecraft_java, no_minecraft_bedrock]
+  preferences: [nat88, hk299]
+persistent_volumes:
+  - name: stock-data
+    path: /var/lib/stock/data
+  - name: stock-queue
+    path: /var/lib/stock/queue
+  - name: stock-lease
+    path: /var/lib/stock/lease
+portable_data:
+  - duckdb
+  - parquet_lake
+  - reports
+  - pending_upload_queue
+secrets:
+  - secret://stock/data-api
+  - secret://stock/llm
+  - secret://stock/ops-mailbox
+  - secret://stock/trankey-api-key
+  - secret://stock/nas
+  - secret://stock/lease-coordinator
+dependencies: [nas, market_data_sources, smtp_imap]
+external_dependencies: [nas, market_data_sources, smtp_imap]
+schedule:
+  mode: singleton
+  cron: "0 2 * * *"
+  timezone: Asia/Shanghai
+singleton_lock:
+  algorithm: atomic_directory_lease
+  lease_seconds: 300
+  renew_seconds: 60
+  stale_after_seconds: 900
+  production_root: /mnt/nasdisk/stock-runtime/lease
+hooks:
+  discover: [hooks/discover.py]
+  preflight: [hooks/preflight.py]
+  build: [hooks/build.py]
+  deploy: [hooks/deploy.py]
+  validate: [hooks/validate.py]
+  activate: [hooks/activate.py]
+  deactivate: [hooks/deactivate.py]
+  migrate: [hooks/migrate.py]
+  failover: [hooks/failover.py]
+  rollback: [hooks/rollback.py]
+  status: [hooks/status.py]
+  health: [hooks/health.py]
+  backup: [hooks/backup.py]
+  restore: [hooks/restore.py]
+  cleanup_stale: [hooks/cleanup_stale.py]
+
+notifications:
+  email: mail@31411414.xyz
+maintenance_agent:
+  bundled: true
+  service: stock-maintenance
+  responsibilities: [health, logs, scheduler, nas_queue, lease, approved_restart_retry, email_send_receive_process_reply]
+  destructive_actions: disabled_by_default
+production_readiness:
+  current: false
+  blockers: [authenticated_target_preflight, portable_image_build, mailbox_send_receive_test, singleton_failover_test, controlled_cutover]

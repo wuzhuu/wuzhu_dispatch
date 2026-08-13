@@ -1,0 +1,44 @@
+llm:
+  enabled: true
+
+extraction:
+  provider: opencode_go
+  protocol: openai
+  base_url: https://opencode.ai/zen/go/v1
+  endpoint: /chat/completions
+  api_key_env: OPENCODE_GO_API_KEY
+  api_key_file: opencode_go_api_key
+  model: deepseek-v4-flash
+  timeout_seconds: 90
+  max_retries: 2
+  temperature: 0.1
+  max_output_tokens: 1800
+  concurrency: 2
+  requests_per_minute: 20
+
+digest:
+  provider: opencode_go
+  protocol: openai
+  base_url: https://opencode.ai/zen/go/v1
+  endpoint: /chat/completions
+  api_key_env: OPENCODE_GO_API_KEY
+  api_key_file: opencode_go_api_key
+  model: deepseek-v4-pro
+  timeout_seconds: 180
+  max_retries: 2
+  temperature: 0.2
+  max_output_tokens: 5000
+  concurrency: 1
+  requests_per_minute: 5
+
+fallback:
+  enabled: true
+  use_keyword_rules: true
+
+news_llm:
+  min_title_length: 8
+  min_summary_length: 20
+  analyze_unmatched_news: true
+  daily_max_articles: 150
+  batch_size: 10
+  skip_duplicates: true

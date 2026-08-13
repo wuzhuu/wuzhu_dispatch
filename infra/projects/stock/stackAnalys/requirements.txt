@@ -1,0 +1,15 @@
+apscheduler>=3.10
+aiohttp>=3.9
+duckdb>=1.0
+loguru>=0.7
+pandas>=2.2
+pyarrow>=15.0
+matplotlib>=3.8
+PyYAML>=6.0
+tenacity>=8.2
+requests>=2.31
+pydantic>=2.0
+akshare>=1.16
+baostock>=0.8.9
+feedparser>=6.0
+yfinance>=0.2

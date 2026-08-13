@@ -1,0 +1,33 @@
+# Runtime state and generated data
+runtime/
+logs/
+stock_local_ai_data/
+raw/
+lake/
+parquet/
+reports/
+work/
+
+# Secrets and credentials
+.env
+.env.*
+key/
+*.pem
+*.key
+*password*
+*token*
+*credential*
+*oauth*
+
+# Python/build artifacts
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Database/locks
+*.db
+*.sqlite3
+*.duckdb
+*.duckdb.wal
+*.duckdb.lock

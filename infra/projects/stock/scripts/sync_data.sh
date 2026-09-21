@@ -19,7 +19,17 @@ NAS_BACKUP_DIR="$NAS_BASE/backups"
 NAS_RETENTION_DAYS=3
 
 # rclone（SMB 比 rsync 稳定：rsync 在 CIFS 挂载上会卡死）
-RCLONE="$HOME/.local/bin/rclone"
+# Portable deployments mount the binary under /etc/hermes-stock/rclone;
+# keep the historical HOME path and PATH fallback for native installs.
+RCLONE="${RCLONE_BIN:-}"
+if [ -z "$RCLONE" ]; then
+    for candidate in "$HOME/.local/bin/rclone" "/etc/hermes-stock/rclone/rclone" "$(command -v rclone 2>/dev/null || true)"; do
+        if [ -x "$candidate" ]; then
+            RCLONE="$candidate"
+            break
+        fi
+    done
+fi
 RCLONE_REMOTE="wuzhunas:nasdisk/stock_local_ai_data"
 
 # SD 卡 (Unison 自己管理路径，这里只需检查挂载)
@@ -55,6 +65,11 @@ total_size() {
 # ========== NAS 单向同步 + 版本快照 ==========
 sync_nas() {
     log "--- NAS 同步开始 ---"
+
+    if [ -z "$RCLONE" ]; then
+        log "ERROR: rclone executable not found; NAS sync skipped"
+        return 1
+    fi
 
     if ! check_mount "/mnt/nasdisk" "NAS"; then
         return 1

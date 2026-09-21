@@ -2,13 +2,13 @@ llm:
   enabled: true
 
 extraction:
-  provider: opencode_go
+  provider: trankey
   protocol: openai
-  base_url: https://opencode.ai/zen/go/v1
+  base_url: https://transfer.31411414.xyz/v1
   endpoint: /chat/completions
-  api_key_env: OPENCODE_GO_API_KEY
+  api_key_env: TRANSFER_API_KEY
   api_key_file: opencode_go_api_key
-  model: deepseek-v4-flash
+  model: gpt-5.6-luna
   timeout_seconds: 90
   max_retries: 2
   temperature: 0.1
@@ -17,13 +17,13 @@ extraction:
   requests_per_minute: 20
 
 digest:
-  provider: opencode_go
+  provider: trankey
   protocol: openai
-  base_url: https://opencode.ai/zen/go/v1
+  base_url: https://transfer.31411414.xyz/v1
   endpoint: /chat/completions
-  api_key_env: OPENCODE_GO_API_KEY
+  api_key_env: TRANSFER_API_KEY
   api_key_file: opencode_go_api_key
-  model: deepseek-v4-pro
+  model: gpt-5.6-luna
   timeout_seconds: 180
   max_retries: 2
   temperature: 0.2
@@ -34,6 +34,9 @@ digest:
 fallback:
   enabled: true
   use_keyword_rules: true
+  provider: trankey
+  base_url: https://transfer.31411414.xyz/v1
+  model: custom
 
 news_llm:
   min_title_length: 8
